@@ -257,14 +257,28 @@ public class TextSelectionHook {
     /**
      * Launch text action via broadcast to KGPT.
      */
+    private static String pendingRequestId;
+    private static String pendingOriginal;
+    private static java.lang.ref.WeakReference<TextView> pendingView = new java.lang.ref.WeakReference<>(null);
+    private static int pendingStart, pendingEnd;
+
     private static void launchTextAction(Context context, TextAction action, String selectedText) {
         try {
             // Send broadcast to KGPT to process the action
             Intent intent = new Intent("tn.eluea.kgpt.TEXT_ACTION_REQUEST");
             intent.putExtra("action", action.name());
+            TextView source = currentTextViewRef.get();
+            if (source == null) return;
+            pendingRequestId = java.util.UUID.randomUUID().toString();
+            pendingOriginal = source.getText().toString();
+            pendingStart = source.getSelectionStart();
+            pendingEnd = source.getSelectionEnd();
+            pendingView = new java.lang.ref.WeakReference<>(source);
+            intent.putExtra("request_id", pendingRequestId);
+            intent.putExtra("reply_package", context.getPackageName());
             intent.putExtra("text", selectedText);
             intent.setPackage("tn.eluea.kgpt");
-            context.sendBroadcast(intent);
+            tn.eluea.kgpt.provider.BridgeAuth.send(context, intent);
 
             log("Sent text action request: " + action.name());
         } catch (Throwable t) {
@@ -283,9 +297,11 @@ public class TextSelectionHook {
             resultReceiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context ctx, Intent intent) {
+            if (!tn.eluea.kgpt.provider.BridgeAuth.verify(ctx, intent)) return;
                     if ("tn.eluea.kgpt.TEXT_ACTION_RESPONSE".equals(intent.getAction())) {
                         String result = intent.getStringExtra("result");
-                        if (result != null && currentTextViewRef.get() != null) {
+                        if (result != null && pendingRequestId != null
+                                && pendingRequestId.equals(intent.getStringExtra("request_id"))) {
                             replaceSelectedText(result);
                         }
                     }
@@ -309,16 +325,22 @@ public class TextSelectionHook {
      * Replace selected text with AI result.
      */
     private static void replaceSelectedText(String newText) {
-        TextView textView = currentTextViewRef.get();
-        if (textView == null)
-            return;
+        final TextView textView = pendingView.get();
+        final String original = pendingOriginal;
+        final int expectedStart = pendingStart, expectedEnd = pendingEnd;
+        pendingRequestId = null;
+        if (textView == null) return;
 
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
                 // Re-check strong reference on UI thread
                 TextView currentTv = currentTextViewRef.get();
-                if (currentTv == null)
+                if (currentTv != textView || !textView.isAttachedToWindow()
+                        || !original.contentEquals(textView.getText())
+                        || textView.getSelectionStart() != expectedStart || textView.getSelectionEnd() != expectedEnd) {
+                    tn.eluea.kgpt.clipboard.AIClipboardStore.append(textView.getContext(), newText);
                     return;
+                }
 
                 int start = currentTv.getSelectionStart();
                 int end = currentTv.getSelectionEnd();

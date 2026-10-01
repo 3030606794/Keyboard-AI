@@ -271,9 +271,10 @@ protected void attachBaseContext(android.content.Context newBase) {
             // Send broadcast to SelectionHandler to commit text
             Intent intent = new Intent(SelectionHandler.ACTION_COMMIT_TEXT);
             intent.putExtra(SelectionHandler.EXTRA_TEXT_TO_COMMIT, text);
+            intent.putExtra("selection_request_id", getIntent().getStringExtra("selection_request_id"));
             intent.putExtra("selection_start", selectionStart);
             intent.putExtra("selection_end", selectionEnd);
-            sendBroadcast(intent);
+            tn.eluea.kgpt.provider.BridgeAuth.send(this, intent);
             finish();
         }
     }

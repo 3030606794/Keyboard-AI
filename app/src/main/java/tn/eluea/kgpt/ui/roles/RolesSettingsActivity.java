@@ -538,7 +538,7 @@ public class RolesSettingsActivity extends AppCompatActivity {
                             Intent i = new Intent(UiInteractor.ACTION_DIALOG_RESULT);
                             String raw = sp.getParsePatternsRaw();
                             if (raw != null) i.putExtra(UiInteractor.EXTRA_PATTERN_LIST, raw);
-                            sendBroadcast(i);
+                            tn.eluea.kgpt.provider.BridgeAuth.send(this, i);
                         } catch (Throwable ignored) {}
 
                         // Refresh UI

@@ -176,6 +176,7 @@ public class UiInteractor {
             mQuickJumpPasteReceiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
+            if (!tn.eluea.kgpt.provider.BridgeAuth.verify(context, intent)) return;
                     if (intent == null) return;
                     String action = intent.getAction();
                     if (action == null || !ACTION_QJ_PASTE_TRIGGER.equals(action)) return;
@@ -271,6 +272,7 @@ public class UiInteractor {
             mAiClipboardPasteReceiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
+            if (!tn.eluea.kgpt.provider.BridgeAuth.verify(context, intent)) return;
                     if (intent == null) return;
                     String action = intent.getAction();
                     if (action == null || !ACTION_AI_CLIPBOARD_PASTE_TEXT.equals(action)) return;
@@ -429,6 +431,7 @@ public class UiInteractor {
     private final BroadcastReceiver mDialogResultReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
+            if (!tn.eluea.kgpt.provider.BridgeAuth.verify(context, intent)) return;
             if (ACTION_DIALOG_RESULT.equals(intent.getAction())) {
                 tn.eluea.kgpt.util.Logger.log("Got result");
                 boolean isPrompt = false;

@@ -17,7 +17,7 @@ public class ConversationMemoryStore {
 
     private static final int MAX_TURNS = 20; // hard cap to avoid unbounded growth
 
-    private static ConversationMemoryStore sInstance;
+    private static volatile ConversationMemoryStore sInstance;
 
     private static final class Turn {
         final String user;

@@ -816,7 +816,7 @@ public class RoleEditActivity extends AppCompatActivity {
                             android.content.Intent i = new android.content.Intent(UiInteractor.ACTION_DIALOG_RESULT);
                             String raw = sp.getParsePatternsRaw();
                             if (raw != null) i.putExtra(UiInteractor.EXTRA_PATTERN_LIST, raw);
-                            sendBroadcast(i);
+                            tn.eluea.kgpt.provider.BridgeAuth.send(this, i);
                         } catch (Throwable ignored) {}
 
                         // Let parent refresh if needed

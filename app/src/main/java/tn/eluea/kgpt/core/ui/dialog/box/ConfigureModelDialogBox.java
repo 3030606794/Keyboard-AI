@@ -293,7 +293,7 @@ public class ConfigureModelDialogBox extends DialogBox {
                                                         broadcastIntent.putExtra(
                                                                         tn.eluea.kgpt.ui.UiInteractor.EXTRA_CONFIG_LANGUAGE_MODEL,
                                                                         getConfig().languageModelsConfig);
-                                                        getContext().sendBroadcast(broadcastIntent);
+                                                        tn.eluea.kgpt.provider.BridgeAuth.send(getContext(), broadcastIntent);
 
                                                         // Go back to model selection instead of closing
                                                         sheet.dismiss();
@@ -312,7 +312,7 @@ public class ConfigureModelDialogBox extends DialogBox {
                                                         broadcastIntent.putExtra(
                                                                         tn.eluea.kgpt.ui.UiInteractor.EXTRA_CONFIG_LANGUAGE_MODEL,
                                                                         getConfig().languageModelsConfig);
-                                                        getContext().sendBroadcast(broadcastIntent);
+                                                        tn.eluea.kgpt.provider.BridgeAuth.send(getContext(), broadcastIntent);
 
                                                         sheet.dismiss();
                                                         switchToDialog(DialogType.ChoseModel);
@@ -332,7 +332,7 @@ public class ConfigureModelDialogBox extends DialogBox {
                                         getConfig().selectedModel.name());
                         broadcastIntent.putExtra(tn.eluea.kgpt.ui.UiInteractor.EXTRA_CONFIG_LANGUAGE_MODEL,
                                         getConfig().languageModelsConfig);
-                        getContext().sendBroadcast(broadcastIntent);
+                        tn.eluea.kgpt.provider.BridgeAuth.send(getContext(), broadcastIntent);
 
                         sheet.dismiss();
                         switchToDialog(DialogType.ChoseModel);

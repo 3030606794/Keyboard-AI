@@ -170,7 +170,7 @@ public class CommandEditDialogBox extends DialogBox {
                     tn.eluea.kgpt.ui.UiInteractor.ACTION_DIALOG_RESULT);
             broadcastIntent.putExtra(tn.eluea.kgpt.ui.UiInteractor.EXTRA_COMMAND_LIST,
                     tn.eluea.kgpt.instruction.command.Commands.encodeCommands(getConfig().commands));
-            getContext().sendBroadcast(broadcastIntent);
+            tn.eluea.kgpt.provider.BridgeAuth.send(getContext(), broadcastIntent);
 
             // Go back to command list instead of closing
             sheet.dismiss();
@@ -188,7 +188,7 @@ public class CommandEditDialogBox extends DialogBox {
                     tn.eluea.kgpt.ui.UiInteractor.ACTION_DIALOG_RESULT);
             broadcastIntent.putExtra(tn.eluea.kgpt.ui.UiInteractor.EXTRA_COMMAND_LIST,
                     tn.eluea.kgpt.instruction.command.Commands.encodeCommands(getConfig().commands));
-            getContext().sendBroadcast(broadcastIntent);
+            tn.eluea.kgpt.provider.BridgeAuth.send(getContext(), broadcastIntent);
 
             sheet.dismiss();
             switchToDialog(DialogType.EditCommandsList);

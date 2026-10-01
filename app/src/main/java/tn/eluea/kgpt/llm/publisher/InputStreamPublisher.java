@@ -37,6 +37,7 @@ public class InputStreamPublisher implements Publisher<String> {
     public void subscribe(Subscriber<? super String> subscriber) {
         Subscription subscription = new Subscription() {
             private volatile boolean cancelled = false;
+            private final java.util.concurrent.atomic.AtomicBoolean started = new java.util.concurrent.atomic.AtomicBoolean();
 
             @Override
             public void request(long n) {
@@ -45,8 +46,9 @@ public class InputStreamPublisher implements Publisher<String> {
                     return;
                 }
 
+                if (cancelled || !started.compareAndSet(false, true)) return;
                 executor.submit(() -> {
-                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(mInputStream))) {
+                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(mInputStream, java.nio.charset.StandardCharsets.UTF_8))) {
                         String line;
                         while (!cancelled && (line = reader.readLine()) != null) {
                             subscriber.onNext(mReplace.apply(line));
@@ -54,10 +56,12 @@ public class InputStreamPublisher implements Publisher<String> {
                         if (!cancelled) {
                             subscriber.onComplete();
                         }
-                    } catch (IOException e) {
+                    } catch (Throwable e) {
                         if (!cancelled) {
                             subscriber.onError(e);
                         }
+                    } finally {
+                        executor.shutdown();
                     }
                 });
             }

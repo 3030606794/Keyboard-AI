@@ -110,6 +110,10 @@ public class ConfigProvider extends ContentProvider {
 
         Log.d(TAG, "onCreate: SharedPreferences has " + mPrefs.getAll().size() + " entries");
 
+        if (!mPrefs.contains(BridgeAuth.KEY)) {
+            mPrefs.edit().putString(BridgeAuth.KEY, java.util.UUID.randomUUID().toString()).commit();
+        }
+
         // Proactively fix permissions on startup
         fixFilePermissions();
 
@@ -122,6 +126,8 @@ public class ConfigProvider extends ContentProvider {
             @Nullable String selection, @Nullable String[] selectionArgs,
             @Nullable String sortOrder) {
 
+        CallerAccess.enforce(getContext(), android.os.Binder.getCallingUid(),
+                sUriMatcher.match(uri) == CONFIG_KEY ? uri.getLastPathSegment() : null);
         MatrixCursor cursor = new MatrixCursor(new String[] { COLUMN_KEY, COLUMN_VALUE, COLUMN_TYPE });
 
         switch (sUriMatcher.match(uri)) {
@@ -166,6 +172,8 @@ public class ConfigProvider extends ContentProvider {
     @Nullable
     @Override
     public Uri insert(@NonNull Uri uri, @Nullable ContentValues values) {
+        CallerAccess.enforce(getContext(), android.os.Binder.getCallingUid(),
+                values != null ? values.getAsString(COLUMN_KEY) : null);
         if (values == null)
             return null;
 
@@ -173,8 +181,9 @@ public class ConfigProvider extends ContentProvider {
         String value = values.getAsString(COLUMN_VALUE);
         String type = values.getAsString(COLUMN_TYPE);
 
-        if (key == null || value == null)
-            return null;
+        if (key == null || value == null) return null;
+        if (BridgeAuth.KEY.equals(key) && android.os.Binder.getCallingUid() != android.os.Process.myUid())
+            throw new SecurityException("Bridge token is read-only outside the module");
 
         SharedPreferences.Editor editor = mPrefs.edit();
 
@@ -231,9 +240,8 @@ public class ConfigProvider extends ContentProvider {
         // LSPosed Wiki: The hooked app reads from the physical file
         boolean success = editor.commit();
 
-        if (success) {
-            fixFilePermissions();
-        }
+        if (!success) return null;
+        fixFilePermissions();
 
         Log.d(TAG, "insert: key=" + key + ", type=" + type + ", success=" + success);
 
@@ -279,13 +287,15 @@ public class ConfigProvider extends ContentProvider {
     @Override
     public int update(@NonNull Uri uri, @Nullable ContentValues values,
             @Nullable String selection, @Nullable String[] selectionArgs) {
-        insert(uri, values);
-        return 1;
+        return insert(uri, values) == null ? 0 : 1;
     }
 
     @Override
     public int delete(@NonNull Uri uri, @Nullable String selection,
             @Nullable String[] selectionArgs) {
+        CallerAccess.enforce(getContext(), android.os.Binder.getCallingUid(),
+                sUriMatcher.match(uri) == CONFIG_KEY ? uri.getLastPathSegment() : null);
+        if (BridgeAuth.KEY.equals(uri.getLastPathSegment())) throw new SecurityException("Cannot delete bridge token");
         if (sUriMatcher.match(uri) == CONFIG_KEY) {
             String key = uri.getLastPathSegment();
             mPrefs.edit().remove(key).commit();

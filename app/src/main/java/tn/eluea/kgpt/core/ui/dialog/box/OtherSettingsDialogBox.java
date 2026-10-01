@@ -118,7 +118,7 @@ public class OtherSettingsDialogBox extends DialogBox {
             android.content.Intent broadcastIntent = new android.content.Intent(
                     tn.eluea.kgpt.ui.UiInteractor.ACTION_DIALOG_RESULT);
             broadcastIntent.putExtra(tn.eluea.kgpt.ui.UiInteractor.EXTRA_OTHER_SETTINGS, getConfig().otherExtras);
-            getContext().sendBroadcast(broadcastIntent);
+            tn.eluea.kgpt.provider.BridgeAuth.send(getContext(), broadcastIntent);
 
             // Go back to settings instead of closing
             sheet.dismiss();

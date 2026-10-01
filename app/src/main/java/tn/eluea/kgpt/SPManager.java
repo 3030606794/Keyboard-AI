@@ -3590,7 +3590,7 @@ public String consumeOutputCapConflictNotice() {
             if (ctx == null) return;
             Intent i = new Intent(tn.eluea.kgpt.ui.UiInteractor.ACTION_DIALOG_RESULT);
             i.putExtra("kgpt_cap_cache_changed", true);
-            ctx.sendBroadcast(i);
+            tn.eluea.kgpt.provider.BridgeAuth.send(ctx, i);
         } catch (Throwable ignored) {}
     }
 

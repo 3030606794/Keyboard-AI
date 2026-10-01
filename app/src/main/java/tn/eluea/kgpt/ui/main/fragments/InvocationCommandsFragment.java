@@ -362,6 +362,6 @@ public class InvocationCommandsFragment extends Fragment {
         // Let's grab patterns from SPManager as well just in case.
         String patternsRaw = SPManager.getInstance().getParsePatternsRaw();
         intent.putExtra("tn.eluea.kgpt.pattern.LIST", patternsRaw);
-        requireContext().sendBroadcast(intent);
+        tn.eluea.kgpt.provider.BridgeAuth.send(requireContext(), intent);
     }
 }

@@ -103,6 +103,7 @@ public class InternetService extends Service {
 
         @Override
         public boolean handleMessage(@NonNull Message msg) {
+            if (!tn.eluea.kgpt.provider.CallerAccess.isModuleOrEnabledIme(InternetService.this, msg.sendingUid)) return true;
             Messenger messenger = msg.replyTo;
             Bundle data = msg.getData();
             int what = msg.what;

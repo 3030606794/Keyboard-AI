@@ -116,6 +116,23 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
     private SimpleAIController controller;
 
     private boolean isGenerating = false;
+    private int generationVersion;
+    private String generatingSessionId;
+
+    private void stopGeneration() {
+        generationVersion++;
+        if (controller != null) controller.cancelRequest();
+        isGenerating = false;
+        generatingSessionId = null;
+        streamingAssistantIndex = -1;
+        updateConfigWarning();
+        saveSessions();
+    }
+
+    private boolean ownsGeneration() {
+        return isGenerating && activeSession != null && activeSession.id.equals(generatingSessionId);
+    }
+
     private int streamingAssistantIndex = -1;
 
     // Attachment pickers
@@ -164,7 +181,7 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
             tvWarning.setOnClickListener(v -> openAiInvocationSettings());
         }
 
-        btnSend.setOnClickListener(v -> sendCurrent());
+        btnSend.setOnClickListener(v -> { if (isGenerating) stopGeneration(); else sendCurrent(); });
         btnPlus.setOnClickListener(v -> showPlusMenu(v));
 
         etInput.setOnEditorActionListener((v, actionId, event) -> {
@@ -235,6 +252,8 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
 
     @Override
     protected void onDestroy() {
+        if (controller != null) controller.cancelRequest();
+        generationVersion++;
         super.onDestroy();
         try {
             if (controller != null) controller.removeListener(this);
@@ -391,7 +410,7 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
                     restoreSessions();
                     for (ChatSession s : sessions) {
                         if (id.equals(s.id)) {
-                            try { ConversationMemoryStore.getInstance().clear(); } catch (Throwable ignored) {}
+                            // Context is rebuilt from this session; no global memory to clear.
                             setActiveSession(s, true);
                             break;
                         }
@@ -445,7 +464,9 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
         }
 
         tvWarning.setVisibility(notReady ? View.VISIBLE : View.GONE);
-        btnSend.setEnabled(!notReady && !isGenerating);
+        btnSend.setEnabled(isGenerating || !notReady);
+        btnSend.setText(isGenerating ? R.string.phase1_stop : R.string.phase1_send);
+        btnSend.setContentDescription(getString(isGenerating ? R.string.phase1_stop : R.string.phase1_send));
         // Keep the input enabled even while generating so the keyboard doesn't collapse.
         etInput.setEnabled(!notReady);
         btnPlus.setEnabled(!notReady && !isGenerating);
@@ -535,6 +556,10 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
 
         // Freeze values that will be captured by background lambdas.
         final String effectivePromptFinal = effectivePrompt;
+        int memoryTurns = SPManager.getInstance().getConversationMemoryLevel();
+        final String sessionPrompt = ChatHistory.build(messages, effectivePrompt, memoryTurns);
+        final int requestVersion = ++generationVersion;
+        generatingSessionId = activeSession.id;
 
         // Clear input AFTER we capture it, but keep keyboard.
         etInput.setText("");
@@ -567,7 +592,9 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
         }
 
         // 2) assistant placeholder (streaming)
-        messages.add(new ChatMessage(ChatMessage.Role.ASSISTANT, ""));
+        ChatMessage placeholder = new ChatMessage(ChatMessage.Role.ASSISTANT, "");
+        placeholder.setComplete(false);
+        messages.add(placeholder);
         streamingAssistantIndex = messages.size() - 1;
         adapter.notifyItemInserted(streamingAssistantIndex);
         scrollToBottom();
@@ -598,23 +625,24 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
 
         // Build request + encode attachments off the UI thread (base64 for screenshots can be heavy).
         new Thread(() -> {
-            String requestPrompt = buildPromptWithAttachments(effectivePromptFinal, pendingSnapshot);
-
-            // If we have images, try a multimodal request; if we fail to read images, fall back to text.
-            if (hasImages) {
-                List<String> dataUris = buildImageDataUris(pendingSnapshot);
-                if (dataUris == null || dataUris.isEmpty()) {
-                    try { tn.eluea.kgpt.util.AiDiagnostics.append("CHAT_IMG", "dataUri_build_failed count=" + countPendingKind(pendingSnapshot, PendingAttachment.Kind.IMAGE)); } catch (Throwable ignored) {}
-                    runOnUiThread(() -> Toast.makeText(AiChatActivity.this, R.string.ui_ai_chat_image_read_failed, Toast.LENGTH_LONG).show());
-                    controller.generateResponse(requestPrompt, null, null, useMemoryFinal);
-                } else {
-                    try { tn.eluea.kgpt.util.AiDiagnostics.append("CHAT_IMG", "dataUris=" + dataUris.size()); } catch (Throwable ignored) {}
-                    controller.generateResponseWithImageDataUris(requestPrompt, dataUris, useMemoryFinal);
-                }
-            } else {
-                controller.generateResponse(requestPrompt, null, null, useMemoryFinal);
+            try {
+                String requestPrompt = buildPromptWithAttachments(sessionPrompt, pendingSnapshot);
+                List<String> dataUris = hasImages ? buildImageDataUris(pendingSnapshot) : java.util.Collections.emptyList();
+                runOnUiThread(() -> {
+                    if (requestVersion != generationVersion || !ownsGeneration() || isFinishing()) return;
+                    if (hasImages && (dataUris == null || dataUris.isEmpty())) {
+                        onAIError(new IllegalStateException(getString(R.string.ui_ai_chat_image_read_failed)));
+                        return;
+                    }
+                    if (hasImages) controller.generateResponseWithImageDataUris(requestPrompt, dataUris, false);
+                    else controller.generateResponse(requestPrompt, null, null, false);
+                });
+            } catch (Throwable error) {
+                runOnUiThread(() -> {
+                    if (requestVersion == generationVersion && ownsGeneration()) onAIError(error);
+                });
             }
-        }).start();
+        }, "KGPT-ChatAttachments").start();
 
         // clear pending UI once we have started the request
         if (!pendingAttachments.isEmpty()) {
@@ -845,6 +873,8 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
 
     private void setActiveSession(ChatSession s, boolean saveNow) {
         if (s == null) return;
+        if (isGenerating) stopGeneration();
+        generationVersion++;
         activeSession = s;
         messages = s.messages;
         if (adapter != null) {
@@ -877,7 +907,7 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
         ChatSession s = new ChatSession(UUID.randomUUID().toString(), System.currentTimeMillis(), getString(R.string.ui_ai_chat_new_session_title));
         s.touch();
         sessions.add(0, s);
-        try { ConversationMemoryStore.getInstance().clear(); } catch (Throwable ignored) {}
+
         setActiveSession(s, true);
     }
 
@@ -1323,7 +1353,7 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
         if (adapter != null) adapter.notifyDataSetChanged();
         streamingAssistantIndex = -1;
         isGenerating = false;
-        try { ConversationMemoryStore.getInstance().clear(); } catch (Throwable ignored) {}
+
         saveSessions();
         Toast.makeText(this, R.string.ui_ai_chat_cleared, Toast.LENGTH_SHORT).show();
         updateConfigWarning();
@@ -1374,6 +1404,7 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
 
     @Override
     public void onAINext(String chunk) {
+        if (!ownsGeneration()) return;
         if (chunk == null || chunk.isEmpty()) return;
         if (streamingAssistantIndex < 0 || streamingAssistantIndex >= messages.size()) return;
 
@@ -1390,6 +1421,7 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
 
     @Override
     public void onAIError(Throwable t) {
+        if (!ownsGeneration()) return;
         isGenerating = false;
         updateConfigWarning();
 
@@ -1402,11 +1434,16 @@ public class AiChatActivity extends AppCompatActivity implements GenerativeAILis
             }
         }
 
+        touchActiveSession();
+        saveSessions();
         Toast.makeText(this, (t != null && t.getMessage() != null) ? t.getMessage() : "Error", Toast.LENGTH_LONG).show();
     }
 
     @Override
     public void onAIComplete() {
+        if (!ownsGeneration()) return;
+        if (streamingAssistantIndex >= 0 && streamingAssistantIndex < messages.size())
+            messages.get(streamingAssistantIndex).setComplete(true);
         isGenerating = false;
         updateConfigWarning();
         scrollToBottom();

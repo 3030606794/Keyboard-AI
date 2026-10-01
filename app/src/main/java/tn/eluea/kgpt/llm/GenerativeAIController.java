@@ -65,7 +65,7 @@ public class GenerativeAIController implements ConfigChangeListener {
      * Running them on the input method (keyboard) main thread can ANR/kill the IME ("keyboard crash").
      */
     private static final java.util.concurrent.ExecutorService REQUEST_EXECUTOR =
-            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            java.util.concurrent.Executors.newCachedThreadPool(r -> {
                 Thread t = new Thread(r, "KGPT-LLM");
                 t.setDaemon(true);
                 return t;
@@ -83,6 +83,13 @@ public class GenerativeAIController implements ConfigChangeListener {
 
     private final java.util.concurrent.atomic.AtomicInteger mRequestSeq = new java.util.concurrent.atomic.AtomicInteger(0);
     private volatile int mActiveRequestId = 0;
+    private volatile tn.eluea.kgpt.llm.internet.RequestCancellation networkCancellation;
+    private final ConversationMemoryStore editorMemory = new ConversationMemoryStore();
+    public void clearEditorMemory() {
+        synchronized (mRequestLock) { editorMemory.clear(); }
+    }
+    public boolean isRequestRunning() { synchronized (mRequestLock) { return mRequestInFlight; } }
+
 
     // Fail-safe watchdog: some provider/client paths may fail before triggering
     // onError/onComplete (e.g., synchronous submitPrompt()/subscribe() exceptions or hangs).
@@ -494,6 +501,8 @@ public class GenerativeAIController implements ConfigChangeListener {
                 mCurrentSubscription = null;
             }
 
+            if (networkCancellation != null) networkCancellation.cancel();
+            networkCancellation = new tn.eluea.kgpt.llm.internet.RequestCancellation();
             mRequestInFlight = true;
             mPendingRequest = null;
 
@@ -552,11 +561,11 @@ public class GenerativeAIController implements ConfigChangeListener {
                     String scope = (modelLabel == null ? "" : modelLabel)
                             + "|" + (subModelLabel == null ? "" : subModelLabel)
                             + "|" + (resolvedRoleId == null ? "" : resolvedRoleId);
-                    ConversationMemoryStore.getInstance().ensureScope(scope);
+                    editorMemory.ensureScope(scope);
 
                     boolean autoSummarize = false;
                     try { autoSummarize = sp.getAutoSummarizeOldContextEnabled(); } catch (Throwable ignored) {}
-                    prompt = ConversationMemoryStore.getInstance().buildPromptWithHistory(prompt, mem, autoSummarize);
+                    prompt = editorMemory.buildPromptWithHistory(prompt, mem, autoSummarize);
                 }
             }
         } catch (Throwable ignored) {}
@@ -594,7 +603,7 @@ public class GenerativeAIController implements ConfigChangeListener {
 
         // Build auto-downgrade attempts list
         final ArrayList<Attempt> attempts = new ArrayList<>();
-        final LanguageModelClient primaryClient = mModelClient;
+        final LanguageModelClient primaryClient = snapshotClient(mModelClient);
         attempts.add(new Attempt(primaryClient, null, null));
 
         int flags = 0;
@@ -638,6 +647,7 @@ public class GenerativeAIController implements ConfigChangeListener {
         // Notify prepare (once per user request)
         if (mInteractor != null) {
             mInteractor.runOnUiThread(() -> {
+                if (mActiveRequestId != myRequestId) return;
                 for (GenerativeAIListener l : mListeners) {
                     try {
                         l.onAIPrepare();
@@ -817,6 +827,7 @@ public class GenerativeAIController implements ConfigChangeListener {
                 boolean first = (sClampNoticeShown.putIfAbsent(key, Boolean.TRUE) == null);
                 if (first) {
                     mInteractor.runOnUiThread(() -> {
+                if (mActiveRequestId != requestId) return;
                         try {
                             if (_reason.contains("hard")) {
                                 try {
@@ -914,7 +925,14 @@ try {
             publisher = new SimpleStringPublisher("Missing API Key. Please configure your API key in KeyboardGPT settings.");
         } else {
             try {
-                publisher = client.submitPrompt(prompt, effectiveSystemMessage);
+                tn.eluea.kgpt.llm.internet.RequestCancellation cancellation;
+                synchronized (mRequestLock) {
+                    if (mActiveRequestId != requestId) return;
+                    cancellation = networkCancellation;
+                }
+                tn.eluea.kgpt.llm.internet.RequestCancellation.bind(cancellation);
+                try { publisher = client.submitPrompt(prompt, effectiveSystemMessage); }
+                finally { tn.eluea.kgpt.llm.internet.RequestCancellation.unbind(); }
             } catch (Throwable t) {
                 tn.eluea.kgpt.util.Logger.log(t);
                 try { SPManager.clearThreadStreamingModeOverride(); } catch (Throwable ignored) {}
@@ -962,6 +980,7 @@ try {
             public void onSubscribe(Subscription s) {
                 // Store subscription for cancellation/concurrency
                 synchronized (mRequestLock) {
+                    if (mActiveRequestId != requestId) { s.cancel(); return; }
                     if (mActiveRequestId == requestId) {
                         mCurrentSubscription = s;
                     }
@@ -974,7 +993,7 @@ try {
 
             @Override
             public void onNext(String s) {
-                if (mActiveRequestId != requestId) return;
+                if (mActiveRequestId != requestId || completed || hasError) return;
 
 
                 if (LanguageModelClient.INTERNAL_KEEPALIVE_MARKER.equals(s)) {
@@ -1001,6 +1020,7 @@ try {
                 if (mInteractor != null) {
                     final String chunk = s;
                     mInteractor.runOnUiThread(() -> {
+                if (mActiveRequestId != requestId) return;
                         for (GenerativeAIListener l : mListeners) {
                             try {
                                 l.onAINext(chunk);
@@ -1151,6 +1171,7 @@ try {
                             if (mInteractor != null) {
                                 final int _safeTok = safe;
                                 mInteractor.runOnUiThread(() -> {
+                if (mActiveRequestId != requestId) return;
                                     try {
                                         String suffix = "";
                                         try {
@@ -1294,6 +1315,7 @@ try {
                         final boolean customFinal = isCustomSel;
                         final Integer capFinal = (capHint != null && capHint > 0) ? capHint : null;
                         mInteractor.runOnUiThread(() -> {
+                if (mActiveRequestId != requestId) return;
                             try {
                                 String msg;
                                 if (customFinal) {
@@ -1399,7 +1421,9 @@ try {
                         if (mem > 0) {
                             String assistant = assistantBuffer.toString();
                             if (assistant != null && !assistant.trim().isEmpty()) {
-                                ConversationMemoryStore.getInstance().addTurn(originalPrompt, assistant);
+                                synchronized (mRequestLock) {
+                                    if (mActiveRequestId == requestId) editorMemory.addTurn(originalPrompt, assistant);
+                                }
                             }
                         }
                     }
@@ -1416,6 +1440,7 @@ try {
                 // Notify complete
                 if (mInteractor != null) {
                     mInteractor.runOnUiThread(() -> {
+                if (mActiveRequestId != requestId) return;
                         for (GenerativeAIListener l : mListeners) {
                             try {
                                 l.onAIComplete();
@@ -1449,10 +1474,28 @@ try {
         }
     }
 
+    private LanguageModelClient snapshotClient(LanguageModelClient source) {
+        if (source == null) return null;
+        LanguageModelClient copy = LanguageModelClient.forModel(source.getLanguageModel());
+        for (LanguageModelField field : LanguageModelField.values()) copy.setField(field, source.getField(field));
+        copy.setInternetProvider(mInternetProvider);
+        return copy;
+    }
+
     private void finishWithError(final int requestId, final Throwable t) {
+        final tn.eluea.kgpt.llm.internet.RequestCancellation cancellation;
+        final Subscription subscription;
+        synchronized (mRequestLock) {
+            if (mActiveRequestId != requestId) return;
+            cancellation = networkCancellation;
+            subscription = mCurrentSubscription;
+        }
+        if (cancellation != null) cancellation.cancel();
+        if (subscription != null) subscription.cancel();
         // Notify error
         if (mInteractor != null) {
             mInteractor.runOnUiThread(() -> {
+                if (mActiveRequestId != requestId) return;
                 for (GenerativeAIListener l : mListeners) {
                     try {
                         l.onAIError(t);
@@ -1494,6 +1537,8 @@ try {
      */
     public void cancelActiveRequestByUser() {
         final Subscription sub;
+        final tn.eluea.kgpt.llm.internet.RequestCancellation cancellation;
+        final int cancellationId;
         synchronized (mRequestLock) {
             if (!mRequestInFlight) {
                 return;
@@ -1504,7 +1549,11 @@ try {
             mPendingRequest = null;
             // Invalidate current request id so late publisher callbacks are ignored.
             mActiveRequestId = mRequestSeq.incrementAndGet();
+            cancellationId = mActiveRequestId;
+            cancellation = networkCancellation;
+            networkCancellation = null;
         }
+        if (cancellation != null) cancellation.cancel();
 
         // Cancel watchdog regardless of request id.
         cancelRequestWatchdog(0);
@@ -1518,6 +1567,7 @@ try {
         // Silent stop marker.
         if (mInteractor != null) {
             mInteractor.runOnUiThread(() -> {
+                if (mActiveRequestId != cancellationId) return;
                 for (GenerativeAIListener l : mListeners) {
                     try {
                         l.onAIError(new RuntimeException(USER_CANCELLED_MARKER));

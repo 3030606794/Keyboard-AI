@@ -303,7 +303,7 @@ public class ApiKeysFragment extends Fragment implements AdditionalApiKeysAdapte
         // Add all model configurations
         broadcastIntent.putExtra("tn.eluea.kgpt.config.model", sp.getConfigBundle());
 
-        requireContext().sendBroadcast(broadcastIntent);
+        tn.eluea.kgpt.provider.BridgeAuth.send(requireContext(), broadcastIntent);
     }
 
     private void setupAdditionalKeys() {

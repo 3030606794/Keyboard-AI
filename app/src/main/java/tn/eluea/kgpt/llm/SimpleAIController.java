@@ -51,13 +51,28 @@ public class SimpleAIController {
      * SimpleInternetProvider uses blocking HttpURLConnection.
      */
     private static final java.util.concurrent.ExecutorService REQUEST_EXECUTOR =
-            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            java.util.concurrent.Executors.newCachedThreadPool(r -> {
                 Thread t = new Thread(r, "KGPT-LLM-App");
                 t.setDaemon(true);
                 return t;
             });
     
     private LanguageModelClient mModelClient = null;
+    private volatile int activeRequestId;
+    private volatile Subscription activeSubscription;
+    private volatile tn.eluea.kgpt.llm.internet.RequestCancellation activeCancellation;
+    private final ConversationMemoryStore memory = new ConversationMemoryStore();
+
+    public void cancelRequest() {
+        activeRequestId = sReqSeq.incrementAndGet();
+        tn.eluea.kgpt.llm.internet.RequestCancellation cancellation = activeCancellation;
+        activeCancellation = null;
+        if (cancellation != null) cancellation.cancel();
+        Subscription subscription = activeSubscription;
+        activeSubscription = null;
+        if (subscription != null) subscription.cancel();
+    }
+
     private final SPManager mSPManager;
     private final Handler mMainHandler;
     private final List<GenerativeAIListener> mListeners = new ArrayList<>();
@@ -186,13 +201,18 @@ public class SimpleAIController {
     }
 
     private void generateResponseInternal(String prompt, String systemMessage, String roleIdOverride, boolean useConversationMemory, List<String> imageDataUris) {
-        Log.d(TAG, "Getting response for text length: " + prompt.length());
-
+        if (prompt == null || prompt.trim().isEmpty()) return;
+        cancelRequest();
         final int requestId = sReqSeq.incrementAndGet();
-
-        if (prompt.isEmpty()) {
-            return;
-        }
+        activeRequestId = requestId;
+        final tn.eluea.kgpt.llm.internet.RequestCancellation cancellation =
+                new tn.eluea.kgpt.llm.internet.RequestCancellation();
+        activeCancellation = cancellation;
+        // Each request owns its model fields, so late retries cannot alter another request.
+        final LanguageModelClient requestClient = LanguageModelClient.forModel(mSPManager.getLanguageModel());
+        for (LanguageModelField field : LanguageModelField.values())
+            requestClient.setField(field, mSPManager.getLanguageModelField(requestClient.getLanguageModel(), field));
+        requestClient.setInternetProvider(new SimpleInternetProvider());
 
         // Apply custom role (system prompt) if configured
         String resolvedRoleId = null;
@@ -217,8 +237,8 @@ public class SimpleAIController {
                 if (mem > 0) {
                     String modelLabel = "";
                     try {
-                        if (mModelClient != null && mModelClient.getLanguageModel() != null)
-                            modelLabel = mModelClient.getLanguageModel().name();
+                        if (requestClient != null && requestClient.getLanguageModel() != null)
+                            modelLabel = requestClient.getLanguageModel().name();
                     } catch (Throwable ignored) {}
 
                     // Scope: provider | subModel | roleId (avoid memory leaking across sub-model switches)
@@ -231,11 +251,11 @@ public class SimpleAIController {
                         }
                     } catch (Throwable ignored2) {}
                     try {
-                        if ((subModelLabel == null || subModelLabel.trim().isEmpty()) && mModelClient != null) {
+                        if ((subModelLabel == null || subModelLabel.trim().isEmpty()) && requestClient != null) {
                             String sm = null;
-                            try { sm = mModelClient.getSubModel(); } catch (Throwable ignored3) {}
+                            try { sm = requestClient.getSubModel(); } catch (Throwable ignored3) {}
                             if (sm == null || sm.trim().isEmpty()) {
-                                try { sm = mModelClient.getField(tn.eluea.kgpt.llm.LanguageModelField.SubModel); } catch (Throwable ignored4) {}
+                                try { sm = requestClient.getField(tn.eluea.kgpt.llm.LanguageModelField.SubModel); } catch (Throwable ignored4) {}
                             }
                             if (sm != null) subModelLabel = sm.trim();
                         }
@@ -244,16 +264,17 @@ public class SimpleAIController {
                     String scope = (modelLabel == null ? "" : modelLabel)
                             + "|" + (subModelLabel == null ? "" : subModelLabel)
                             + "|" + (resolvedRoleId == null ? "" : resolvedRoleId);
-                    ConversationMemoryStore.getInstance().ensureScope(scope);
+                    memory.ensureScope(scope);
                     boolean autoSummarize = false;
                     try { autoSummarize = sp.getAutoSummarizeOldContextEnabled(); } catch (Throwable ignored3) {}
-                    prompt = ConversationMemoryStore.getInstance().buildPromptWithHistory(prompt, mem, autoSummarize);
+                    prompt = memory.buildPromptWithHistory(prompt, mem, autoSummarize);
                 }
             }
         } catch (Throwable ignored) {}
 
         // Notify prepare on main thread
         mMainHandler.post(() -> {
+                    if (activeRequestId != requestId || cancellation.isCancelled()) return;
             for (GenerativeAIListener l : mListeners) {
                 l.onAIPrepare();
             }
@@ -266,8 +287,8 @@ public class SimpleAIController {
 
         // Scheme-2 safety: if we have a cached safe max tokens for this model, clamp to it.
         try {
-            if (mModelClient != null && SPManager.isReady()) {
-                Integer cap = SPManager.getInstance().getCachedSafeMaxTokens(mModelClient.getLanguageModel(), mModelClient.getSubModel());
+            if (requestClient != null && SPManager.isReady()) {
+                Integer cap = SPManager.getInstance().getCachedSafeMaxTokens(requestClient.getLanguageModel(), requestClient.getSubModel());
                 if (cap != null && cap > 0 && maxTokensOverride > cap) {
                     maxTokensOverride = cap;
                 }
@@ -305,40 +326,40 @@ public class SimpleAIController {
         final int reasoningThinkingModeFinal = reasoningThinkingMode;
 
         String prevMaxTokens = null;
-        try { if (mModelClient != null) prevMaxTokens = mModelClient.getField(LanguageModelField.MaxTokens); } catch (Throwable ignored) {}
+        try { if (requestClient != null) prevMaxTokens = requestClient.getField(LanguageModelField.MaxTokens); } catch (Throwable ignored) {}
         final String prevMaxTokensFinal = prevMaxTokens;
         String prevTemperature = null;
-        try { if (mModelClient != null) prevTemperature = mModelClient.getField(LanguageModelField.Temperature); } catch (Throwable ignored) {}
+        try { if (requestClient != null) prevTemperature = requestClient.getField(LanguageModelField.Temperature); } catch (Throwable ignored) {}
         final String prevTemperatureFinal = prevTemperature;
         String prevSubModel = null;
-        try { if (mModelClient != null) prevSubModel = mModelClient.getField(LanguageModelField.SubModel); } catch (Throwable ignored) {}
+        try { if (requestClient != null) prevSubModel = requestClient.getField(LanguageModelField.SubModel); } catch (Throwable ignored) {}
         final String prevSubModelFinal = prevSubModel;
         // Track the effective max tokens used for scheme-2 retry.
         final int[] maxTokensEffective = new int[]{maxTokensOverride};
 
         // Pre-clamp by learned cap and provider hard cap to avoid repeated invalid requests.
         try {
-            if (mModelClient != null && SPManager.isReady() && maxTokensEffective[0] > 0) {
+            if (requestClient != null && SPManager.isReady() && maxTokensEffective[0] > 0) {
                 int req = maxTokensEffective[0];
                 int eff = req;
                 SPManager spm = SPManager.getInstance();
-                Integer learned = spm.getCachedSafeMaxTokens(mModelClient.getLanguageModel(), mModelClient.getSubModel());
+                Integer learned = spm.getCachedSafeMaxTokens(requestClient.getLanguageModel(), requestClient.getSubModel());
                 if (learned != null && learned > 0) eff = Math.min(eff, learned);
-                Integer hard = spm.getCachedHardMaxTokens(mModelClient.getLanguageModel(), mModelClient.getSubModel());
+                Integer hard = spm.getCachedHardMaxTokens(requestClient.getLanguageModel(), requestClient.getSubModel());
                 if (hard != null && hard > 0) eff = Math.min(eff, hard);
                 if (eff != req && eff > 0) {
                     maxTokensEffective[0] = eff;
                     try {
-                        AiDiagnostics.append("MAXTOK_PRECLAMP", "provider=" + mModelClient.getLanguageModel()
-                                + ", subModel=" + mModelClient.getSubModel()
+                        AiDiagnostics.append("MAXTOK_PRECLAMP", "provider=" + requestClient.getLanguageModel()
+                                + ", subModel=" + requestClient.getSubModel()
                                 + ", req=" + req + ", eff=" + eff
                                 + ", learned=" + String.valueOf(learned) + ", hard=" + String.valueOf(hard));
                     // Record hard-cap hit for management UI.
                     try {
                         if (hard != null && hard > 0 && req > hard) {
                             spm.recordHardCapLastHit(
-                                    mModelClient.getLanguageModel(),
-                                    mModelClient.getSubModel(),
+                                    requestClient.getLanguageModel(),
+                                    requestClient.getSubModel(),
                                     "preclamp " + req + " → " + eff + " (hard=" + hard + ")"
                             );
                         }
@@ -356,8 +377,8 @@ public class SimpleAIController {
                         if (usedHard) reason = (reason.equals("user") ? "hard" : (reason + "+hard"));
                     }
                     spm.recordLastMaxTokensDecision(
-                            mModelClient.getLanguageModel(),
-                            mModelClient.getSubModel(),
+                            requestClient.getLanguageModel(),
+                            requestClient.getSubModel(),
                             requestId,
                             userSlotTokens,
                             (maxTokensEffective[0] > 0 ? maxTokensEffective[0] : req),
@@ -372,24 +393,24 @@ public class SimpleAIController {
         } catch (Throwable ignored) {}
 
         try {
-            if (mModelClient != null && maxTokensEffective[0] > 0) {
-                mModelClient.setField(LanguageModelField.MaxTokens, String.valueOf(maxTokensEffective[0]));
+            if (requestClient != null && maxTokensEffective[0] > 0) {
+                requestClient.setField(LanguageModelField.MaxTokens, String.valueOf(maxTokensEffective[0]));
             }
         } catch (Throwable ignored) {}
 
         try {
-            if (mModelClient != null && roleSubModelOverride != null && !roleSubModelOverride.trim().isEmpty()) {
-                mModelClient.setField(LanguageModelField.SubModel, roleSubModelOverride.trim());
+            if (requestClient != null && roleSubModelOverride != null && !roleSubModelOverride.trim().isEmpty()) {
+                requestClient.setField(LanguageModelField.SubModel, roleSubModelOverride.trim());
             }
         } catch (Throwable ignored) {}
 
         try {
-            if (mModelClient != null && tn.eluea.kgpt.llm.ModelCapabilities.supportsTemperature(mModelClient.getLanguageModel(), mModelClient.getSubModel())) {
+            if (requestClient != null && tn.eluea.kgpt.llm.ModelCapabilities.supportsTemperature(requestClient.getLanguageModel(), requestClient.getSubModel())) {
                 float v = normalThinking;
                 if (v < 0.0f) v = 0.0f;
                 if (v > 1.8f) v = 1.8f;
                 v = Math.round(v * 10.0f) / 10.0f;
-                mModelClient.setField(LanguageModelField.Temperature, String.format(Locale.US, "%.1f", v));
+                requestClient.setField(LanguageModelField.Temperature, String.format(Locale.US, "%.1f", v));
             }
         } catch (Throwable ignored) {}
 
@@ -401,13 +422,16 @@ public class SimpleAIController {
 
         final Runnable[] startRequest = new Runnable[1];
         startRequest[0] = () -> {
+            if (activeRequestId != requestId || cancellation.isCancelled()) return;
+            tn.eluea.kgpt.llm.internet.RequestCancellation.bind(cancellation);
+            try {
             Publisher<String> pub;
             if (needModelClient() || needApiKey()) {
                 pub = new SimpleStringPublisher("Missing API Key. Please configure your API key in KGPT settings.");
             } else {
                 String effectiveSystemMessage = systemMessageFinal;
                 try {
-                    if (mModelClient != null && tn.eluea.kgpt.llm.ModelCapabilities.supportsReasoningThinking(mModelClient.getLanguageModel(), mModelClient.getSubModel())) {
+                    if (requestClient != null && tn.eluea.kgpt.llm.ModelCapabilities.supportsReasoningThinking(requestClient.getLanguageModel(), requestClient.getSubModel())) {
                         effectiveSystemMessage = tn.eluea.kgpt.ui.lab.ReasoningModelThinkingOptions.applyToSystemMessage(systemMessageFinal, reasoningThinkingModeFinal);
                     }
                 } catch (Throwable ignored) {}
@@ -415,11 +439,11 @@ public class SimpleAIController {
                 // If not supported, fall back to plain-text prompt.
                 if (imageDataUrisFinal != null
                         && !imageDataUrisFinal.isEmpty()
-                        && (mModelClient instanceof tn.eluea.kgpt.llm.client.ChatGPTClient)) {
-                    pub = ((tn.eluea.kgpt.llm.client.ChatGPTClient) mModelClient)
+                        && (requestClient instanceof tn.eluea.kgpt.llm.client.ChatGPTClient)) {
+                    pub = ((tn.eluea.kgpt.llm.client.ChatGPTClient) requestClient)
                             .submitPromptWithImageDataUris(promptFinal, effectiveSystemMessage, imageDataUrisFinal);
                 } else {
-                    pub = mModelClient.submitPrompt(promptFinal, effectiveSystemMessage);
+                    pub = requestClient.submitPrompt(promptFinal, effectiveSystemMessage);
                 }
             }
 
@@ -431,31 +455,35 @@ public class SimpleAIController {
 
             private void restoreOverrides() {
                 try {
-                    if (mModelClient != null && prevSubModelFinal != null) {
-                        mModelClient.setField(LanguageModelField.SubModel, prevSubModelFinal);
+                    if (requestClient != null && prevSubModelFinal != null) {
+                        requestClient.setField(LanguageModelField.SubModel, prevSubModelFinal);
                     }
                 } catch (Throwable ignored) {}
 
                 try {
-                    if (mModelClient != null && prevMaxTokensFinal != null) {
-                        mModelClient.setField(LanguageModelField.MaxTokens, prevMaxTokensFinal);
+                    if (requestClient != null && prevMaxTokensFinal != null) {
+                        requestClient.setField(LanguageModelField.MaxTokens, prevMaxTokensFinal);
                     }
                 } catch (Throwable ignored) {}
 
                 try {
-                    if (mModelClient != null && prevTemperatureFinal != null) {
-                        mModelClient.setField(LanguageModelField.Temperature, prevTemperatureFinal);
+                    if (requestClient != null && prevTemperatureFinal != null) {
+                        requestClient.setField(LanguageModelField.Temperature, prevTemperatureFinal);
                     }
                 } catch (Throwable ignored) {}
             }
 
 @Override
             public void onSubscribe(Subscription s) {
+                if (activeRequestId != requestId || cancellation.isCancelled()) { s.cancel(); return; }
+                activeSubscription = s;
                 s.request(Long.MAX_VALUE);
             }
 
             @Override
             public void onNext(String s) {
+                if (activeRequestId != requestId || cancellation.isCancelled() || completed) return;
+                if (LanguageModelClient.INTERNAL_KEEPALIVE_MARKER.equals(s)) return;
                 if (s == null || s.isEmpty()) {
                     return;
                 }
@@ -470,7 +498,10 @@ public class SimpleAIController {
 
                         // Wait for ':' / '：' or enough chars.
                         boolean hasColon = buf.contains(":") || buf.contains("：");
-                        if (!hasColon && leadingLabelBuffer.length() < 16) {
+                        String candidate = buf.trim().toLowerCase(java.util.Locale.ROOT);
+                        boolean possibleLabel = candidate.isEmpty() || "assistant".startsWith(candidate)
+                                || "助手".startsWith(candidate) || candidate.matches("(?:assistant|助手)\\s*");
+                        if (!hasColon && possibleLabel && leadingLabelBuffer.length() < 16) {
                             return;
                         }
 
@@ -496,6 +527,7 @@ public class SimpleAIController {
                 final String chunk = s;
 
                 mMainHandler.post(() -> {
+                    if (activeRequestId != requestId || cancellation.isCancelled()) return;
                     for (GenerativeAIListener l : mListeners) {
                         l.onAINext(chunk);
                     }
@@ -504,6 +536,7 @@ public class SimpleAIController {
 
             @Override
             public void onError(Throwable t) {
+                if (activeRequestId != requestId || cancellation.isCancelled()) return;
                 if (completed || hasError) {
                     Log.d(TAG, "Skipping duplicate onError");
                     return;
@@ -520,8 +553,8 @@ public class SimpleAIController {
                 if (canRetrySampling) {
                     retriedSamplingParams[0] = true;
                     try {
-                        if (mModelClient != null && SPManager.isReady()) {
-                            SPManager.getInstance().setCachedSupportsTemperature(mModelClient.getLanguageModel(), mModelClient.getSubModel(), false);
+                        if (requestClient != null && SPManager.isReady()) {
+                            SPManager.getInstance().setCachedSupportsTemperature(requestClient.getLanguageModel(), requestClient.getSubModel(), false);
                         }
                     } catch (Throwable ignored) {}
 
@@ -571,15 +604,15 @@ public class SimpleAIController {
                     if (safe < current) {
                         maxTokensEffective[0] = safe;
                         try {
-                            if (mModelClient != null) {
-                                mModelClient.setField(LanguageModelField.MaxTokens, String.valueOf(safe));
+                            if (requestClient != null) {
+                                requestClient.setField(LanguageModelField.MaxTokens, String.valueOf(safe));
                             }
                         } catch (Throwable ignored) {}
                         try {
-                            if (mModelClient != null && SPManager.isReady()) {
+                            if (requestClient != null && SPManager.isReady()) {
                                 SPManager spm = SPManager.getInstance();
-                                LanguageModel _p = mModelClient.getLanguageModel();
-                                String _m = mModelClient.getSubModel();
+                                LanguageModel _p = requestClient.getLanguageModel();
+                                String _m = requestClient.getSubModel();
                                 boolean learnedWritten = false;
                                 // Record hard cap (compliance) even if auto-learning is off.
                                 if (hard != null && hard > 0) {
@@ -626,8 +659,8 @@ public class SimpleAIController {
                         } catch (Throwable ignored) {}
 
                         try {
-                            AiDiagnostics.append("MAXTOK_FAILSAFE", "provider=" + (mModelClient == null ? "null" : mModelClient.getLanguageModel())
-                                    + ", subModel=" + (mModelClient == null ? "null" : mModelClient.getSubModel())
+                            AiDiagnostics.append("MAXTOK_FAILSAFE", "provider=" + (requestClient == null ? "null" : requestClient.getLanguageModel())
+                                    + ", subModel=" + (requestClient == null ? "null" : requestClient.getSubModel())
                                     + ", current=" + current + ", safe=" + safe
                                     + ", suggested=" + String.valueOf(suggested)
                                     + ", hard=" + String.valueOf(hard));
@@ -659,10 +692,11 @@ public class SimpleAIController {
                         boolean isCustomSel = false;
                         Integer capHint = null;
                         try { isCustomSel = SPManager.getInstance().getMaxTokensIsCustom(); } catch (Throwable ignored) {}
-                        try { if (mModelClient != null && SPManager.isReady()) capHint = SPManager.getInstance().getCachedSafeMaxTokens(mModelClient.getLanguageModel(), mModelClient.getSubModel()); } catch (Throwable ignored) {}
+                        try { if (requestClient != null && SPManager.isReady()) capHint = SPManager.getInstance().getCachedSafeMaxTokens(requestClient.getLanguageModel(), requestClient.getSubModel()); } catch (Throwable ignored) {}
                         final boolean customFinal = isCustomSel;
                         final Integer capFinal = (capHint != null && capHint > 0) ? capHint : null;
                         mMainHandler.post(() -> {
+                    if (activeRequestId != requestId || cancellation.isCancelled()) return;
                             try {
                                 String msg = customFinal
                                         ? ((capFinal != null) ? ("当前为自定义输出长度，缓存上限约 " + capFinal + " tokens；请手动调低后重试") : "当前为自定义输出长度，模型拒绝该长度；请手动调低后重试")
@@ -674,6 +708,7 @@ public class SimpleAIController {
                 } catch (Throwable ignoredToast) {}
 
                 mMainHandler.post(() -> {
+                    if (activeRequestId != requestId || cancellation.isCancelled()) return;
                     for (GenerativeAIListener l : mListeners) {
                         l.onAIError(t);
                     }
@@ -682,9 +717,14 @@ public class SimpleAIController {
 
             @Override
             public void onComplete() {
+                if (activeRequestId != requestId || cancellation.isCancelled()) return;
                 if (completed || hasError) {
                     Log.d(TAG, "Skipping duplicate onComplete");
                     return;
+                }
+                if (!checkedLeadingLabel && leadingLabelBuffer.length() > 0) {
+                    checkedLeadingLabel = true;
+                    onNext(LEADING_ASSISTANT_LABEL.matcher(leadingLabelBuffer.toString()).replaceFirst(""));
                 }
                 completed = true;
                 restoreOverrides();
@@ -692,10 +732,10 @@ public class SimpleAIController {
                 Log.d(TAG, "AI request completed");
 
                 try {
-                    if (mModelClient != null && SPManager.isReady()) {
+                    if (requestClient != null && SPManager.isReady()) {
                         SPManager spm = SPManager.getInstance();
-                        LanguageModel _p = mModelClient.getLanguageModel();
-                        String _m = mModelClient.getSubModel();
+                        LanguageModel _p = requestClient.getLanguageModel();
+                        String _m = requestClient.getSubModel();
                         try { spm.markSubModelLastUsed(_p, _m); } catch (Throwable ignoredMark) {}
                         if (maxTokensEffective[0] > 0 && spm.shouldAutoLearnOutputCap(_p, _m, true)) {
                             boolean protectManual = spm.isOutputCapManualProtectEnabled(_p, _m) && spm.hasManualOutputCapResult(_p, _m);
@@ -712,19 +752,26 @@ public class SimpleAIController {
                         if (mem > 0) {
                             String assistant = assistantBuffer.toString();
                             if (assistant != null && !assistant.trim().isEmpty()) {
-                                ConversationMemoryStore.getInstance().addTurn(originalPrompt, assistant);
+                                memory.addTurn(originalPrompt, assistant);
                             }
                         }
                     }
                 } catch (Throwable ignored) {}
 
                 mMainHandler.post(() -> {
+                    if (activeRequestId != requestId || cancellation.isCancelled()) return;
                     for (GenerativeAIListener l : mListeners) {
                         l.onAIComplete();
                     }
                 });
             }
         });
+            } catch (Throwable error) {
+                mMainHandler.post(() -> {
+                    if (activeRequestId != requestId || cancellation.isCancelled()) return;
+                    for (GenerativeAIListener listener : mListeners) listener.onAIError(error);
+                });
+            } finally { tn.eluea.kgpt.llm.internet.RequestCancellation.unbind(); }
         };
 
         // Start first attempt

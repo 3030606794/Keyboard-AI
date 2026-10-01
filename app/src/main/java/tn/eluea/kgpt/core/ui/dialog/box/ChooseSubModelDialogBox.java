@@ -176,7 +176,7 @@ public class ChooseSubModelDialogBox extends DialogBox {
 
             // Other settings bundle (e.g., AI trigger multiline toggle)
             i.putExtra(UiInteractor.EXTRA_OTHER_SETTINGS, sp.getOtherSettings());
-            ctx.sendBroadcast(i);
+            tn.eluea.kgpt.provider.BridgeAuth.send(ctx, i);
         } catch (Exception ignored) {
         }
     }
@@ -465,7 +465,7 @@ public class ChooseSubModelDialogBox extends DialogBox {
                         broadcastIntent.putExtra(UiInteractor.EXTRA_CONFIG_SELECTED_MODEL, provider.name());
                     }
                     broadcastIntent.putExtra(UiInteractor.EXTRA_CONFIG_LANGUAGE_MODEL, sp.getConfigBundle());
-                    root.getContext().sendBroadcast(broadcastIntent);
+                    tn.eluea.kgpt.provider.BridgeAuth.send(root.getContext(), broadcastIntent);
                 } catch (Exception ignored) {}
 
                 Toast.makeText(root.getContext(), root.getContext().getString(R.string.ui_done), Toast.LENGTH_SHORT).show();
@@ -1184,7 +1184,7 @@ private boolean pasteQuickJumpTriggerToIme(String triggerWord) {
 
                     if (pkgs.isEmpty()) {
                         // Last resort: implicit broadcast (works only if the receiver is already registered in the running IME process).
-                        ctx.sendBroadcast(base);
+                        tn.eluea.kgpt.provider.BridgeAuth.send(ctx, base);
                         return true;
                     }
 
@@ -1193,7 +1193,7 @@ private boolean pasteQuickJumpTriggerToIme(String triggerWord) {
                         try {
                             Intent it = new Intent(base);
                             it.setPackage(pkg);
-                            ctx.sendBroadcast(it);
+                            tn.eluea.kgpt.provider.BridgeAuth.send(ctx, it);
                             sent = true;
                         } catch (Throwable ignored) {
                         }

@@ -26,6 +26,9 @@ public class ChatMessage {
      * For IMAGE/FILE: optional caption / prompt.
      */
     private String text;
+    private boolean complete = true;
+    public boolean isComplete() { return complete; }
+    public void setComplete(boolean complete) { this.complete = complete; }
 
     // Attachment fields (only for IMAGE/FILE)
     private String uri;      // content://...

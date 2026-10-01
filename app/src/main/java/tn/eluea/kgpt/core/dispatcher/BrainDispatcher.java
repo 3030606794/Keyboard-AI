@@ -40,6 +40,13 @@ public class BrainDispatcher {
         this.commandManager = commandManager;
     }
 
+    public boolean requiresAi(ParseResult result) {
+        if (result instanceof AIParseResult || result instanceof InlineAskParseResult || result instanceof TextActionParseResult) return true;
+        String name = result instanceof CommandParseResult ? ((CommandParseResult) result).command
+                : result instanceof InlineCommandParseResult ? ((InlineCommandParseResult) result).command : null;
+        return name != null && commandManager.get(name) instanceof GenerativeAICommand;
+    }
+
     public void dispatch(ParseResult parseResult) {
         IMSController imsController = UiInteractor.getInstance().getIMSController();
 
@@ -178,6 +185,11 @@ public class BrainDispatcher {
         // Get the system message for this action
         String systemMessage = TextActionPrompts.getSystemMessage(result.action);
         String prompt = TextActionPrompts.buildPrompt(result.action, result.text);
+
+        if (aiManager.hasSafeEdit()) {
+            aiManager.generateResponse(prompt, systemMessage);
+            return;
+        }
 
         // First, commit the original text back (since we deleted the command)
         imsController.stopNotifyInput();

@@ -24,6 +24,7 @@ public class GeneratingStatusBridgeReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
+            if (!tn.eluea.kgpt.provider.BridgeAuth.verify(context, intent)) return;
         if (intent == null) return;
         try {
             if (!ACTION.equals(intent.getAction())) return;

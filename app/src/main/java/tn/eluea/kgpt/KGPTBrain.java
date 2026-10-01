@@ -152,6 +152,19 @@ public class KGPTBrain implements InputEventListener, DialogDismissListener {
                 }
             }
 
+            if (brainDispatcher.requiresAi(result)) {
+                int replaceEnd = effectiveEnd;
+                if (result instanceof AIParseResult && !SPManager.getInstance().getAiTriggerMultilineEnabled()) {
+                    int next = text.indexOf('\n', cursor);
+                    int cr = text.indexOf('\r', cursor);
+                    if (next < 0 || (cr >= 0 && cr < next)) next = cr;
+                    replaceEnd = next >= 0 ? next : text.length();
+                }
+                if (aiResponseManager.prepareSafeEdit(text, result.indexStart, replaceEnd))
+                    processParsedText(text, result);
+                return;
+            }
+
             int deleteCount = effectiveEnd - result.indexStart;
 
                 // IMPORTANT:
@@ -251,7 +264,13 @@ public class KGPTBrain implements InputEventListener, DialogDismissListener {
      * Clean up resources when the brain is no longer needed.
      * Call this when the InputMethodService is destroyed.
      */
+    public void onEditorFinished() {
+        aiResponseManager.cancelSafeRequest();
+        mAIController.clearEditorMemory();
+    }
+
     public void destroy() {
+        onEditorFinished();
         // Remove listeners
         IMSController.getInstance().removeListener(this);
         UiInteractor.getInstance().unregisterOnDismissListener(this);

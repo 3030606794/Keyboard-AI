@@ -50,9 +50,12 @@ public class HookManager {
     }
 
     public void unhook(Predicate<Method> clearPredicate) {
-        for (Method method: unhookMap.keySet()) {
-            if (clearPredicate.test(method)) {
-                unhookMap.remove(method).unhook();
+        java.util.Iterator<Map.Entry<Method, XC_MethodHook.Unhook>> iterator = unhookMap.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Method, XC_MethodHook.Unhook> entry = iterator.next();
+            if (clearPredicate.test(entry.getKey())) {
+                entry.getValue().unhook();
+                iterator.remove();
             }
         }
     }

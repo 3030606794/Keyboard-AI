@@ -6538,7 +6538,7 @@ private void showCustomSubModelInputDialog(@NonNull LanguageModel provider, @Nul
             Intent i = new Intent(UiInteractor.ACTION_DIALOG_RESULT);
             i.putExtra(UiInteractor.EXTRA_CONFIG_SELECTED_MODEL, sp.getLanguageModel().name());
             i.putExtra(UiInteractor.EXTRA_CONFIG_LANGUAGE_MODEL, sp.getConfigBundle());
-            requireContext().sendBroadcast(i);
+            tn.eluea.kgpt.provider.BridgeAuth.send(requireContext(), i);
         } catch (Throwable ignored) {
         }
     }

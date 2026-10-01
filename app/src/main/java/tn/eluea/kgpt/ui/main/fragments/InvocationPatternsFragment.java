@@ -437,7 +437,7 @@ public class InvocationPatternsFragment extends Fragment {
             if (patternsRaw != null) {
                 i.putExtra(UiInteractor.EXTRA_PATTERN_LIST, patternsRaw);
             }
-            requireContext().sendBroadcast(i);
+            tn.eluea.kgpt.provider.BridgeAuth.send(requireContext(), i);
         } catch (Throwable ignored) {
         }
     }

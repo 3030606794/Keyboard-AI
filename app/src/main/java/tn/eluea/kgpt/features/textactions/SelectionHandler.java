@@ -60,6 +60,8 @@ public class SelectionHandler {
     private final Handler debounceHandler = new Handler(Looper.getMainLooper());
     private Runnable pendingShowMenu;
 
+    private tn.eluea.kgpt.core.input.SafeInputEdit menuEdit;
+    private String menuRequestId;
     private BroadcastReceiver resultReceiver;
     private volatile boolean receiverRegistered = false;
 
@@ -91,45 +93,20 @@ public class SelectionHandler {
         resultReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
+            if (!tn.eluea.kgpt.provider.BridgeAuth.verify(context, intent)) return;
                 if (ACTION_COMMIT_TEXT.equals(intent.getAction())) {
+                    if (menuRequestId == null || !menuRequestId.equals(intent.getStringExtra("selection_request_id"))) return;
                     String text = intent.getStringExtra(EXTRA_TEXT_TO_COMMIT);
                     int start = intent.getIntExtra("selection_start", -1);
                     int end = intent.getIntExtra("selection_end", -1);
 
-                    InputMethodService currentIms = currentImsRef != null ? currentImsRef.get() : null;
-                    if (text != null && currentIms != null) {
-                        try {
-                            InputConnection ic = currentIms.getCurrentInputConnection();
-                            if (ic != null) {
-                                ic.beginBatchEdit();
-                                
-                                if (start >= 0 && end >= 0 && start != end) {
-                                    int selStart = Math.min(start, end);
-                                    int selEnd = Math.max(start, end);
-                                    int selectedLength = selEnd - selStart;
-                                    
-                                    // Method 1: Set selection and delete, then commit
-                                    // First, set cursor to the end of selection
-                                    ic.setSelection(selEnd, selEnd);
-                                    // Delete backwards (the selected text)
-                                    ic.deleteSurroundingText(selectedLength, 0);
-                                    // Now commit the new text at cursor position
-                                    ic.commitText(text, 1);
-                                    
-                                    tn.eluea.kgpt.util.Logger
-                                            .log("Replaced " + selectedLength + " chars at [" + selStart + ", " + selEnd + "] with " + text.length() + " chars");
-                                } else {
-                                    // No valid selection, just commit at cursor
-                                    ic.commitText(text, 1);
-                                    tn.eluea.kgpt.util.Logger.log("Committed text at cursor (no selection)");
-                                }
-                                
-                                ic.endBatchEdit();
-                            }
-                        } catch (Exception e) {
-                            tn.eluea.kgpt.util.Logger.log("Failed to commit text: " + e.getMessage());
-                        }
+                    boolean inserted = text != null && menuEdit != null && menuEdit.complete(text);
+                    if (!inserted && text != null && !text.trim().isEmpty()) {
+                        tn.eluea.kgpt.clipboard.AIClipboardStore.append(context, text);
+                        android.widget.Toast.makeText(context, "输入框已变化，结果已保存到 AI 剪贴板", android.widget.Toast.LENGTH_LONG).show();
                     }
+                    menuEdit = null;
+                    menuRequestId = null;
                     isMenuShowing = false;
                 }
             }
@@ -274,6 +251,8 @@ public class SelectionHandler {
             return;
         }
 
+        menuEdit = tn.eluea.kgpt.ui.IMSController.getInstance().captureSafeEdit(null, -1, -1);
+        menuRequestId = java.util.UUID.randomUUID().toString();
         lastMenuShowTime = now;
         isMenuShowing = true;
 
@@ -288,6 +267,7 @@ public class SelectionHandler {
             intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
             intent.putExtra(TextActionsMenuActivity.EXTRA_SELECTED_TEXT, selectedText);
             intent.putExtra("selection_start", start);
+            intent.putExtra("selection_request_id", menuRequestId);
             intent.putExtra("selection_end", end);
             intent.putExtra(TextActionsMenuActivity.EXTRA_READONLY, false);
 
@@ -317,6 +297,8 @@ public class SelectionHandler {
             pendingShowMenu = null;
         }
         
+        if (menuEdit != null) menuEdit.cancel();
+        menuEdit = null;
         // Clear references
         currentImsRef = null;
 

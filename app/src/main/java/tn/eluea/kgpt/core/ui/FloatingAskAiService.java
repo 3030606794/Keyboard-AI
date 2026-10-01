@@ -99,6 +99,8 @@ public class FloatingAskAiService extends Service {
             startForeground(NOTIF_ID, buildNotification());
         } catch (Throwable t) {
             Logger.error("FloatingAskAiService: startForeground failed: " + t);
+            stopSelf();
+            return START_NOT_STICKY;
         }
 
         main.post(this::showBubbleIfNeeded);

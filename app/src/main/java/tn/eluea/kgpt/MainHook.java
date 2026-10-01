@@ -105,8 +105,8 @@ if (lpparam.packageName.equals("tn.eluea.kgpt")) {
         SPManager.init(applicationContext);
         UiInteractor.init(applicationContext);
 
-        brain = new KGPTBrain(applicationContext);
     }
+    if (brain == null) brain = new KGPTBrain(applicationContext);
 }
 
 private void onImeCreated(InputMethodService ims, String source) {
@@ -170,15 +170,27 @@ private void hookKeyboard(XC_LoadPackage.LoadPackageParam lpparam) {
                     brain = null;
                 }
                 
+                sCreatedImeInstances.remove(System.identityHashCode(ims));
+
                 // Reset hook cache
                 lastHookedInputConnectionClass = null;
                 lastHookTime = 0;
             }
         });
 
+        XposedHelpers.findAndHookMethod(InputMethodService.class, "onStartInput", EditorInfo.class, boolean.class,
+                new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        if (brain != null) brain.onEditorFinished();
+                        IMSController.getInstance().invalidateEditor();
+                    }
+                });
+
         XposedHelpers.findAndHookMethod(InputMethodService.class, "onFinishInput", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                if (brain != null) brain.onEditorFinished();
+                IMSController.getInstance().invalidateEditor();
                 MainHook.log("InputMethodService onFinishInput");
             }
         });
@@ -198,7 +210,9 @@ private void hookKeyboard(XC_LoadPackage.LoadPackageParam lpparam) {
                 new Class<?>[] { int.class, int.class, int.class, int.class, int.class, int.class },
                 MethodHook.after(param -> {
                     InputMethodService ims = (InputMethodService) param.thisObject;
-                    String packageName = ims.getCurrentInputEditorInfo().packageName;
+                    EditorInfo editor = ims.getCurrentInputEditorInfo();
+                    if (editor == null) return;
+                    String packageName = editor.packageName;
                     if (BuildConfig.APPLICATION_ID.equals(packageName)) {
                         return;
                     }
@@ -244,7 +258,8 @@ private void hookKeyboard(XC_LoadPackage.LoadPackageParam lpparam) {
                     
                     // Only unhook and rehook if the class actually changed
                     if (!newInputConnectionClass.equals(lastHookedInputConnectionClass)) {
-                        hookManager.unhook(m -> m.getClass().equals(inputConnectionClass));
+                        hookManager.unhook(m -> inputConnectionClass != null
+                                && m.getDeclaringClass().isAssignableFrom(inputConnectionClass));
                         
                         MainHook.log("InputMethodService onStartInput");
                         inputMethodServiceClass = ims.getClass();
@@ -275,7 +290,8 @@ private void hookKeyboard(XC_LoadPackage.LoadPackageParam lpparam) {
         XC_MethodHook gateAndUpdate = new MethodHook(null, param -> {
             // When input is locked (AI is writing), we MUST NOT run expensive parsing.
             // However, we still allow a very lightweight "interrupt gesture" to stop/pause output.
-            if (IMSController.getInstance().isInputLocked()) {
+            if (IMSController.getInstance().isInputLocked()
+                    || ServiceLocator.getInstance().getGenerativeAIController().isRequestRunning()) {
                 try {
                     // Avoid false positives: ignore our own commits/deletes.
                     if (IMSController.getInstance().isSelfMutationInProgress()) {

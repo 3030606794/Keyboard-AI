@@ -1,2 +1,8 @@
 
 一键上传GPT-assistant仓库 - 副本.bat
+
+.gradle/
+**/build/
+local.properties
+*.jks
+*.keystore

@@ -560,11 +560,78 @@ public void addListener(InputEventListener listener) {
         }
     }
 
+    private long editorGeneration;
+
+    public void invalidateEditor() {
+        editorGeneration++;
+        clearDeferred();
+        forceResetLock();
+        resetShadow();
+    }
+
+    public tn.eluea.kgpt.core.input.SafeInputEdit captureSafeEdit(String expected, int start, int end) {
+        final InputConnection connection = getIC();
+        if (connection == null || ims == null) return null;
+        android.view.inputmethod.EditorInfo info = ims.getCurrentInputEditorInfo();
+        if (info == null) return null;
+        int variation = info.inputType & android.text.InputType.TYPE_MASK_VARIATION;
+        int type = info.inputType & android.text.InputType.TYPE_MASK_CLASS;
+        if ((type == android.text.InputType.TYPE_CLASS_TEXT &&
+                (variation == android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+                 variation == android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
+                 variation == android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD)) ||
+                (type == android.text.InputType.TYPE_CLASS_NUMBER &&
+                 variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD)) return null;
+        final ExtractedText snapshot;
+        try { snapshot = connection.getExtractedText(new ExtractedTextRequest(), 0); }
+        catch (RuntimeException e) { return null; }
+        if (snapshot == null || snapshot.text == null) return null;
+        String text = snapshot.text.toString();
+        if (expected != null && !expected.equals(text)) return null;
+        int from = start < 0 ? Math.min(snapshot.selectionStart, snapshot.selectionEnd) : start;
+        int to = end < 0 ? Math.max(snapshot.selectionStart, snapshot.selectionEnd) : end;
+        if (from < 0 || to < from || to > text.length()) return null;
+        final long generation = editorGeneration;
+        return new tn.eluea.kgpt.core.input.SafeInputEdit(new tn.eluea.kgpt.core.input.SafeInputEdit.Editor() {
+            public boolean matches(String original, int selStart, int selEnd) {
+                if (generation != editorGeneration || connection != getIC()) return false;
+                try {
+                    ExtractedText current = connection.getExtractedText(new ExtractedTextRequest(), 0);
+                    return current != null && current.text != null && original.contentEquals(current.text)
+                            && current.startOffset == snapshot.startOffset
+                            && current.selectionStart == selStart && current.selectionEnd == selEnd;
+                } catch (RuntimeException e) { return false; }
+            }
+            public boolean replace(int from, int to, String replacement) {
+                stopNotifyInput();
+                beginSelfMutation();
+                try {
+                    connection.beginBatchEdit();
+                    if (!connection.setSelection(snapshot.startOffset + from, snapshot.startOffset + to)) return false;
+                    boolean committed = connection.commitText(replacement, 1);
+                    if (!committed) connection.setSelection(snapshot.startOffset + snapshot.selectionStart,
+                            snapshot.startOffset + snapshot.selectionEnd);
+                    return committed;
+                } catch (RuntimeException e) {
+                    try { connection.setSelection(snapshot.startOffset + snapshot.selectionStart,
+                            snapshot.startOffset + snapshot.selectionEnd); } catch (RuntimeException ignored) { }
+                    return false;
+                } finally {
+                    try { connection.endBatchEdit(); } catch (RuntimeException ignored) { }
+                    endSelfMutation();
+                    startNotifyInput();
+                }
+            }
+        }, text, snapshot.selectionStart, snapshot.selectionEnd, from, to);
+    }
+
     public void registerService(InputMethodService ims) {
+        invalidateEditor();
         this.ims = ims;
     }
 
     public void unregisterService(InputMethodService ims) {
+        invalidateEditor();
         this.ims = null;
         try { shadow.setLength(0); } catch (Throwable ignored) {}
         composingActive = false;
@@ -988,8 +1055,7 @@ public void addListener(InputEventListener listener) {
         }
         beginSelfMutation();
         try {
-            ic.deleteSurroundingText(count, 0);
-            return true;
+            return ic.deleteSurroundingText(count, 0);
         } catch (Throwable t) {
             Logger.error("IMS delete failed: " + t.getMessage());
             return false;
@@ -1005,8 +1071,7 @@ public void addListener(InputEventListener listener) {
         }
         beginSelfMutation();
         try {
-            ic.deleteSurroundingText(Math.max(0, before), Math.max(0, after));
-            return true;
+            return ic.deleteSurroundingText(Math.max(0, before), Math.max(0, after));
         } catch (Throwable t) {
             Logger.error("IMS deleteSurrounding failed: " + t.getMessage());
             return false;
@@ -1027,8 +1092,7 @@ public void addListener(InputEventListener listener) {
         }
         beginSelfMutation();
         try {
-            ic.commitText(text, newCursorPosition);
-            return true;
+            return ic.commitText(text, newCursorPosition);
         } catch (Throwable t) {
             Logger.error("IMS commit failed: " + t.getMessage());
             return false;

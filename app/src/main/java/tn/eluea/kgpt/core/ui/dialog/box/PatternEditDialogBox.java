@@ -193,7 +193,7 @@ public class PatternEditDialogBox extends DialogBox {
                     tn.eluea.kgpt.ui.UiInteractor.ACTION_DIALOG_RESULT);
             broadcastIntent.putExtra(tn.eluea.kgpt.ui.UiInteractor.EXTRA_PATTERN_LIST,
                     tn.eluea.kgpt.text.parse.ParsePattern.encode(getConfig().patterns));
-            getContext().sendBroadcast(broadcastIntent);
+            tn.eluea.kgpt.provider.BridgeAuth.send(getContext(), broadcastIntent);
 
             String statusMsg = isEnabled ? "enabled" : "disabled";
             Toast.makeText(getContext(), "Trigger \"" + symbol + "\" " + statusMsg, Toast.LENGTH_SHORT).show();

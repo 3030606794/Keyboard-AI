@@ -62,6 +62,7 @@ public class ChatSession {
                 jm.put("role", m.getRole().name());
                 jm.put("kind", m.getKind().name());
                 jm.put("text", m.getText());
+                jm.put("complete", m.isComplete());
                 if (m.getKind() != ChatMessage.Kind.TEXT) {
                     jm.put("uri", m.getUri());
                     jm.put("mime", m.getMime());
@@ -120,6 +121,7 @@ public class ChatSession {
                 } else {
                     s.messages.add(new ChatMessage(r, text));
                 }
+                s.messages.get(s.messages.size() - 1).setComplete(jm.optBoolean("complete", true));
             }
         }
         return s;

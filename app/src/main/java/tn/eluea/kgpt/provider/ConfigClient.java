@@ -183,9 +183,14 @@ public class ConfigClient {
         cv.put(ConfigProvider.COLUMN_TYPE, ConfigProvider.TYPE_STRING);
 
         try {
-            mResolver.insert(ConfigProvider.CONTENT_URI, cv);
+            if (mResolver.insert(ConfigProvider.CONTENT_URI, cv) == null) {
+                mCache.remove(key);
+                throw new IllegalStateException("Configuration could not be saved");
+            }
         } catch (Exception e) {
+            mCache.remove(key);
             Log.w(TAG, "Provider insert failed for: " + key, e);
+            throw new IllegalStateException("Configuration could not be saved", e);
         }
     }
 
@@ -310,9 +315,14 @@ public class ConfigClient {
         cv.put(ConfigProvider.COLUMN_TYPE, ConfigProvider.TYPE_BOOLEAN);
 
         try {
-            mResolver.insert(ConfigProvider.CONTENT_URI, cv);
+            if (mResolver.insert(ConfigProvider.CONTENT_URI, cv) == null) {
+                mCache.remove(key);
+                throw new IllegalStateException("Configuration could not be saved");
+            }
         } catch (Exception e) {
+            mCache.remove(key);
             Log.w(TAG, "Provider insert failed for: " + key, e);
+            throw new IllegalStateException("Configuration could not be saved", e);
         }
     }
 
@@ -382,9 +392,14 @@ public class ConfigClient {
         cv.put(ConfigProvider.COLUMN_TYPE, ConfigProvider.TYPE_INT);
 
         try {
-            mResolver.insert(ConfigProvider.CONTENT_URI, cv);
+            if (mResolver.insert(ConfigProvider.CONTENT_URI, cv) == null) {
+                mCache.remove(key);
+                throw new IllegalStateException("Configuration could not be saved");
+            }
         } catch (Exception e) {
+            mCache.remove(key);
             Log.w(TAG, "Provider insert failed for: " + key, e);
+            throw new IllegalStateException("Configuration could not be saved", e);
         }
     }
 
@@ -451,9 +466,14 @@ public class ConfigClient {
         cv.put(ConfigProvider.COLUMN_TYPE, ConfigProvider.TYPE_LONG);
 
         try {
-            mResolver.insert(ConfigProvider.CONTENT_URI, cv);
+            if (mResolver.insert(ConfigProvider.CONTENT_URI, cv) == null) {
+                mCache.remove(key);
+                throw new IllegalStateException("Configuration could not be saved");
+            }
         } catch (Exception e) {
+            mCache.remove(key);
             Log.w(TAG, "Provider insert failed for: " + key, e);
+            throw new IllegalStateException("Configuration could not be saved", e);
         }
     }
 
@@ -524,9 +544,14 @@ public class ConfigClient {
         cv.put(ConfigProvider.COLUMN_TYPE, ConfigProvider.TYPE_FLOAT);
 
         try {
-            mResolver.insert(ConfigProvider.CONTENT_URI, cv);
+            if (mResolver.insert(ConfigProvider.CONTENT_URI, cv) == null) {
+                mCache.remove(key);
+                throw new IllegalStateException("Configuration could not be saved");
+            }
         } catch (Exception e) {
+            mCache.remove(key);
             Log.w(TAG, "Provider insert failed for: " + key, e);
+            throw new IllegalStateException("Configuration could not be saved", e);
         }
     }
 

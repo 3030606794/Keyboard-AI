@@ -100,7 +100,7 @@ public abstract class DialogBox {
         // Also send broadcast for in-memory listeners (TextParser, CommandManager)
         Intent broadcastIntent = new Intent(UiInteractor.ACTION_DIALOG_RESULT);
         getConfig().fillIntent(broadcastIntent);
-        getContext().sendBroadcast(broadcastIntent);
+        tn.eluea.kgpt.provider.BridgeAuth.send(getContext(), broadcastIntent);
 
         getParent().finish();
     }

@@ -37,6 +37,7 @@ public class TextActionReceiver extends BroadcastReceiver implements GenerativeA
 
     @Override
     public void onReceive(Context context, Intent intent) {
+            if (!tn.eluea.kgpt.provider.BridgeAuth.verify(context, intent)) return;
         if (!ACTION_REQUEST.equals(intent.getAction()))
             return;
 
@@ -54,7 +55,28 @@ public class TextActionReceiver extends BroadcastReceiver implements GenerativeA
 
         try {
             TextAction action = TextAction.valueOf(actionName);
-            processTextAction(action, text);
+            String requestId = intent.getStringExtra("request_id");
+            String replyPackage = intent.getStringExtra("reply_package");
+            if (requestId == null || replyPackage == null) return;
+            StringBuilder buffer = new StringBuilder();
+            GenerativeAIController controller = new GenerativeAIController();
+            controller.addListener(new GenerativeAIListener() {
+                public void onAIPrepare() { }
+                public void onAINext(String chunk) {
+                    if (!tn.eluea.kgpt.llm.client.LanguageModelClient.INTERNAL_KEEPALIVE_MARKER.equals(chunk)) buffer.append(chunk);
+                }
+                public void onAIError(Throwable error) {
+                    android.widget.Toast.makeText(context, "生成失败，原文已保留", android.widget.Toast.LENGTH_LONG).show();
+                }
+                public void onAIComplete() {
+                    Intent response = new Intent(ACTION_RESPONSE).setPackage(replyPackage);
+                    response.putExtra("request_id", requestId);
+                    response.putExtra("result", buffer.toString());
+                    tn.eluea.kgpt.provider.BridgeAuth.send(context, response);
+                }
+            });
+            controller.generateResponse(TextActionPrompts.buildPrompt(action, text),
+                    TextActionPrompts.getSystemMessage(action), null, false);
         } catch (IllegalArgumentException e) {
             Log.e(TAG, "Unknown action: " + actionName);
         }
@@ -106,7 +128,7 @@ public class TextActionReceiver extends BroadcastReceiver implements GenerativeA
 
         Intent responseIntent = new Intent(ACTION_RESPONSE);
         responseIntent.putExtra("result", result);
-        context.sendBroadcast(responseIntent);
+        tn.eluea.kgpt.provider.BridgeAuth.send(context, responseIntent);
 
         Log.d(TAG, "Sent response broadcast");
     }

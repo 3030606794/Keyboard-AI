@@ -1951,6 +1951,11 @@ if (ok) {
      * @param triggerText trigger string ("!!" or "/stop"), null for backspace gesture
      */
     public void requestUserInterrupt(final int mode, final int deleteBeforeCursor, final String triggerText) {
+        if (safeRequestRunning) {
+            cancelSafeRequest();
+            UiInteractor.getInstance().toastShort("已停止生成，原文已保留");
+            return;
+        }
         // Ensure we run on main looper (AiResponseManager is UI-thread oriented).
         try {
             // Prioritize interrupt over queued streaming ticks.
@@ -2096,6 +2101,51 @@ if (ok) {
         }
     }
 
+    private tn.eluea.kgpt.core.input.SafeInputEdit pendingSafeEdit;
+    private tn.eluea.kgpt.core.input.SafeInputEdit activeSafeEdit;
+    private final StringBuilder safeResponse = new StringBuilder();
+    private volatile boolean safeRequestRunning;
+
+    public boolean hasSafeEdit() { return pendingSafeEdit != null; }
+
+    public boolean prepareSafeEdit(String text, int start, int end) {
+        if (safeRequestRunning || mAIController.isRequestRunning()) {
+            UiInteractor.getInstance().toastShort("正在生成，请先停止当前请求");
+            return false;
+        }
+        pendingSafeEdit = IMSController.getInstance().captureSafeEdit(text, start, end);
+        if (pendingSafeEdit == null) {
+            UiInteractor.getInstance().toastShort("无法安全读取此输入框，原文已保留，请使用选中文字或应用内聊天");
+            return false;
+        }
+        return true;
+    }
+
+    public void cancelSafeRequest() {
+        if (safeRequestRunning) {
+            finishSafeRequest(false);
+            mAIController.cancelActiveRequestByUser();
+        }
+        if (pendingSafeEdit != null) pendingSafeEdit.cancel();
+        pendingSafeEdit = null;
+    }
+
+    private void finishSafeRequest(boolean success) {
+        String output = LEADING_ASSISTANT_LABEL.matcher(safeResponse.toString()).replaceFirst("");
+        boolean inserted = success && activeSafeEdit != null && activeSafeEdit.complete(output);
+        if (!inserted && !output.trim().isEmpty()) {
+            AIClipboardStore.append(UiInteractor.getInstance().getContext(), output);
+            UiInteractor.getInstance().toastLong("结果已保存到 AI 剪贴板，原文已保留");
+        }
+        if (activeSafeEdit != null) activeSafeEdit.cancel();
+        activeSafeEdit = null;
+        safeResponse.setLength(0);
+        safeRequestRunning = false;
+        setTextActionMode(false, null);
+        TopStatusBanner.getInstance().hide();
+        broadcastStandaloneGenHide();
+    }
+
     public void generateResponse(String prompt, String systemMessage) {
         generateResponse(prompt, systemMessage, null);
     }
@@ -2131,6 +2181,21 @@ if (ok) {
             return;
         }
 
+        if (safeRequestRunning || mAIController.isRequestRunning()) {
+            pendingSafeEdit = null;
+            UiInteractor.getInstance().toastShort("正在生成，请先停止当前请求");
+            return;
+        }
+        activeSafeEdit = pendingSafeEdit != null ? pendingSafeEdit
+                : IMSController.getInstance().captureSafeEdit(null, -1, -1);
+        pendingSafeEdit = null;
+        if (activeSafeEdit == null) {
+            UiInteractor.getInstance().toastShort("无法安全替换此输入框，原文已保留");
+            return;
+        }
+        safeResponse.setLength(0);
+        safeRequestRunning = true;
+
         // Snapshot the role for UI placeholders (thinking/reply markers).
         // This is best-effort: the controller may run async, so we cache the last requested role.
         try {
@@ -2148,21 +2213,12 @@ if (ok) {
         resetLeadingAssistantLabelStripState();
 
         // Use thread pool instead of creating new threads
-        aiExecutor.execute(() -> {
-            boolean useMemory = !isTextActionMode;
-            try {
-                // Prefer role+memory API if available
-                mAIController.generateResponse(prompt, systemMessage, roleIdOverride, useMemory);
-            } catch (Throwable t1) {
-                try {
-                    // Fall back to role-aware signature
-                    mAIController.generateResponse(prompt, systemMessage, roleIdOverride);
-                } catch (Throwable t2) {
-                    // Backward compatibility: legacy signature
-                    mAIController.generateResponse(prompt, systemMessage);
-                }
-            }
-        });
+        // The controller owns background work; acceptance happens before any editor mutation.
+        try {
+            mAIController.generateResponse(prompt, systemMessage, roleIdOverride, !isTextActionMode);
+        } catch (Throwable error) {
+            onAIError(error);
+        }
     }
 
     public void setTextActionMode(boolean enabled, String selectedText) {
@@ -2178,379 +2234,12 @@ if (ok) {
 
     @Override
     public void onAIPrepare() {
-        aiDiag("UI_PREPARE", "onAIPrepare");
-        resetInterruptState();
-        // In case a previous request didn't finish cleanly.
-        stopReplyingToastLoop(/*showDoneToast*/false);
-        stopThinkingPlaceholderTicker();
-        bufferedResponse.setLength(0);
-        streamPending.setLength(0);
-        streamPrefetch.setLength(0);
-        cancelStreamTicks();
-        streamCompleted = false;
-        streamReceivedTotalChars = 0;
-        streamCommittedTotalChars = 0;
-
-        prefetchEnabledSnapshot = false;
-        prefetchRenderStarted = false;
-
-        // Reset non-linear runtime state per request
-        nonLinearTickIndex = 0;
-        markovPrevMs = Double.NaN;
-        punctuationPauseNextTick = false;
-
-        nonLinearLastChar = '\0';
-        pidInit = false;
-        pidPrevErr = 0.0;
-        pidCurMs = 0.0;
-        logisticFatigue = 0.0;
-        perlinPhase = 0.0;
-        perlinPhaseOffsets = null;
-
-        // Snapshot settings once per request so behavior doesn't change mid-response.
-        streamingSpeedPercentSnapshot = 60;
-        streamingSpeedAutoSnapshot = true;
-        streamingGranularitySnapshot = SPManager.STREAM_GRANULARITY_CHARS;
-        streamingSpeedAlgorithmSnapshot = SPManager.STREAM_SPEED_ALGO_LINEAR;
-        streamingEnabledSnapshot = false;
-
-        // Reset prefetch defaults per request (so a failed prefs read won't reuse old values).
-        prefetchStartCharsSnapshot = DEFAULT_PREFETCH_START_CHARS;
-        prefetchLowWatermarkSnapshot = DEFAULT_PREFETCH_LOW_WATERMARK;
-        prefetchTopUpTargetSnapshot = DEFAULT_PREFETCH_TOPUP_TARGET;
-        try {
-            boolean userStreamingEnabled = tn.eluea.kgpt.SPManager.getInstance().getStreamingOutputEnabled();
-            streamingSpeedPercentSnapshot = tn.eluea.kgpt.SPManager.getInstance().getStreamingOutputSpeedPercent();
-            streamingSpeedAutoSnapshot = tn.eluea.kgpt.SPManager.getInstance().getStreamingOutputSpeedAutoEnabled();
-            streamingGranularitySnapshot = tn.eluea.kgpt.SPManager.getInstance().getStreamingOutputGranularity();
-            streamingSpeedAlgorithmSnapshot = tn.eluea.kgpt.SPManager.getInstance().getStreamingOutputSpeedAlgorithm();
-
-            // If user selects the non-linear algorithm, they almost certainly expect a paced/typewriter
-            // output. When the "streaming output" toggle is OFF, the app used to commit everything at
-            // once (making the non-linear settings appear to not work). To reduce confusion, we
-            // auto-enable local pacing for this request when NONLINEAR is selected.
-            streamingEnabledSnapshot = userStreamingEnabled
-                    || (streamingSpeedAlgorithmSnapshot == SPManager.STREAM_SPEED_ALGO_NONLINEAR);
-
-            // Prefetch buffering: decouple network chunk jitter from UI rendering.
-            // Only enable for NONLINEAR (unless user explicitly turns it off).
-            int pfMode = tn.eluea.kgpt.SPManager.getInstance().getStreamingPrefetchMode();
-            prefetchEnabledSnapshot = streamingEnabledSnapshot
-                    && (streamingSpeedAlgorithmSnapshot == SPManager.STREAM_SPEED_ALGO_NONLINEAR)
-                    && (pfMode != tn.eluea.kgpt.SPManager.STREAM_PREFETCH_OFF);
-
-            // Prefetch thresholds (per request).
-            // Presets are hard-coded for stability; CUSTOM reads user values.
-            int pfStart = DEFAULT_PREFETCH_START_CHARS;
-            int pfLow = DEFAULT_PREFETCH_LOW_WATERMARK;
-            int pfTop = DEFAULT_PREFETCH_TOPUP_TARGET;
-            if (pfMode == tn.eluea.kgpt.SPManager.STREAM_PREFETCH_FAST) {
-                pfStart = 60;
-                pfLow = 40;
-                pfTop = 160;
-            } else if (pfMode == tn.eluea.kgpt.SPManager.STREAM_PREFETCH_STABLE) {
-                pfStart = 180;
-                pfLow = 120;
-                pfTop = 360;
-            } else if (pfMode == tn.eluea.kgpt.SPManager.STREAM_PREFETCH_CUSTOM) {
-                pfStart = tn.eluea.kgpt.SPManager.getInstance().getStreamingPrefetchStartChars();
-                pfLow = tn.eluea.kgpt.SPManager.getInstance().getStreamingPrefetchLowWatermark();
-                pfTop = tn.eluea.kgpt.SPManager.getInstance().getStreamingPrefetchTopUpTarget();
-            }
-
-            // Sanity constraints to avoid weird states.
-            if (pfStart < 0) pfStart = 0;
-            if (pfLow < 0) pfLow = 0;
-            if (pfTop < 0) pfTop = 0;
-            if (pfTop < pfLow) pfTop = pfLow;
-            if (pfTop < pfStart) pfTop = pfStart;
-            prefetchStartCharsSnapshot = pfStart;
-            prefetchLowWatermarkSnapshot = pfLow;
-            prefetchTopUpTargetSnapshot = pfTop;
-
-            // Non-linear snapshots (will be used if algorithm == NONLINEAR)
-            streamingNonLinearModelSnapshot = tn.eluea.kgpt.SPManager.getInstance().getStreamingNonLinearModel();
-            nonLinearSigmaMsSnapshot = tn.eluea.kgpt.SPManager.getInstance().getStreamingNonLinearSigmaMs();
-            nonLinearPauseMultiplierSnapshot = tn.eluea.kgpt.SPManager.getInstance().getStreamingNonLinearPauseMultiplier();
-
-            // Per-model params
-            nlLcTBaseMs = tn.eluea.kgpt.SPManager.getInstance().getNlLinearConstantTBaseMs();
-
-            nlExpTMaxMs = tn.eluea.kgpt.SPManager.getInstance().getNlExpTMaxMs();
-            nlExpTMinMs = tn.eluea.kgpt.SPManager.getInstance().getNlExpTMinMs();
-            nlExpLambda = tn.eluea.kgpt.SPManager.getInstance().getNlExpLambda();
-
-            nlSineTBaseMs = tn.eluea.kgpt.SPManager.getInstance().getNlSineTBaseMs();
-            nlSineAMs = tn.eluea.kgpt.SPManager.getInstance().getNlSineAMs();
-            nlSineOmega = tn.eluea.kgpt.SPManager.getInstance().getNlSineOmega();
-            nlSinePhi = tn.eluea.kgpt.SPManager.getInstance().getNlSinePhi();
-
-            nlDampTBaseMs = tn.eluea.kgpt.SPManager.getInstance().getNlDampTBaseMs();
-            nlDampAMs = tn.eluea.kgpt.SPManager.getInstance().getNlDampAMs();
-            nlDampOmega = tn.eluea.kgpt.SPManager.getInstance().getNlDampOmega();
-            nlDampZeta = tn.eluea.kgpt.SPManager.getInstance().getNlDampZeta();
-            nlDampPhi = tn.eluea.kgpt.SPManager.getInstance().getNlDampPhi();
-
-            nlSquareTBaseMs = tn.eluea.kgpt.SPManager.getInstance().getNlSquareTBaseMs();
-            nlSquareAMs = tn.eluea.kgpt.SPManager.getInstance().getNlSquareAMs();
-            nlSquareOmega = tn.eluea.kgpt.SPManager.getInstance().getNlSquareOmega();
-
-            nlMarkovMuMs = tn.eluea.kgpt.SPManager.getInstance().getNlMarkovMuMs();
-            nlMarkovRho = tn.eluea.kgpt.SPManager.getInstance().getNlMarkovRho();
-            nlMarkovSigmaMs = tn.eluea.kgpt.SPManager.getInstance().getNlMarkovSigmaMs();
-            nlMarkovTMinMs = tn.eluea.kgpt.SPManager.getInstance().getNlMarkovTMinMs();
-            nlMarkovTMaxMs = tn.eluea.kgpt.SPManager.getInstance().getNlMarkovTMaxMs();
-            nlMarkovPThinkProb = tn.eluea.kgpt.SPManager.getInstance().getNlMarkovPThinkProbability();
-
-            // v16+ geek models
-            nlPerlinBaseSpeed = tn.eluea.kgpt.SPManager.getInstance().getNlPerlinBaseSpeed();
-            nlPerlinOctaves = tn.eluea.kgpt.SPManager.getInstance().getNlPerlinOctaves();
-            nlPerlinFrequency = tn.eluea.kgpt.SPManager.getInstance().getNlPerlinFrequency();
-
-            nlPidTargetSpeed = tn.eluea.kgpt.SPManager.getInstance().getNlPidTargetSpeed();
-            nlPidP = tn.eluea.kgpt.SPManager.getInstance().getNlPidP();
-            nlPidD = tn.eluea.kgpt.SPManager.getInstance().getNlPidD();
-
-            nlLogiInitialBurstMs = tn.eluea.kgpt.SPManager.getInstance().getNlLogisticInitialBurstMs();
-            nlLogiDecayHalfLife = tn.eluea.kgpt.SPManager.getInstance().getNlLogisticDecayHalfLife();
-            nlLogiRecovery = tn.eluea.kgpt.SPManager.getInstance().getNlLogisticRecovery();
-
-            nlRetroKeySpeedMs = tn.eluea.kgpt.SPManager.getInstance().getNlRetroKeySpeedMs();
-            nlRetroCrDelayMs = tn.eluea.kgpt.SPManager.getInstance().getNlRetroCrDelayMs();
-            nlRetroPuncDragMs = tn.eluea.kgpt.SPManager.getInstance().getNlRetroPuncDragMs();
-        } catch (Throwable ignored) {}
-
-        // Reset last tick delay to a sane value at the start of a request.
-        lastTickDelayMs = DEFAULT_TICK_MS;
-
-        // Snapshot Generating Content settings once per request
-        generatingContentEnabledSnapshot = true;
-        generatingContentSnapshot = null;
-        suffixAfterCursorSnapshot = "";
-        rawSuffixKeywordSnapshot = "";
-
-        toastEnabledSnapshot = true;
-        inputRoleMarkerEnabledSnapshot = false;
-        inputRoleMarkerApplyToSuffixSnapshot = true;
-        inputRoleMarkerApplyToPrefixSnapshot = false;
-        currentRequestRoleNameSnapshot = null;
-        dynamicPrefixEnabledSnapshot = true;
-        tokenBurnerEnabledSnapshot = true;
-        completeSoundSnapshot = SPManager.GEN_SOUND_NONE;
-        generatingTypingSoundEnabledSnapshot = false;
-        generatingTypingSoundStyleSnapshot = SPManager.GEN_TYPING_SOUND_STYLE_CLICK;
-        thinkingElapsedEnabledSnapshot = true;
-        replyTokenCounterEnabledSnapshot = false;
-        replyTokenCounterAutoRemoveSnapshot = true;
-        replyTokenCounterAutoRemoveDelayMsSnapshot = 0L;
-
-        vibrateOnReplySnapshot = false;
-        vibrateIntensityPercentSnapshot = 65;
-        vibrateFrequencyPercentSnapshot = 70;
-        minVibrateIntervalMsSnapshot = MIN_VIBRATE_INTERVAL_MS;
-        vibAmplitudeSnapshot = VibrationEffect.DEFAULT_AMPLITUDE;
-
-        markerStyleSnapshot = SPManager.GEN_MARKER_STYLE_PLAIN;
-        markerColorSnapshot = SPManager.GEN_MARKER_COLOR_BLUE;
-        markerAnimLengthSnapshot = 6;
-        markerAnimSpeedPercentSnapshot = 70;
-
-        replyStartedThisRequest = false;
-        suffixInsertedThisRequest = false;
-        currentReplyMarkerAfterCursor = "";
-        replyToastShownThisRequest = false;
-        completionSoundPlayedThisRequest = false;
-        rainbowBaseBlocks = null;
-        rainbowAnimStep = 0;
-        rainbowAnimTickCounter = 0;
-        lastVibrateAtMs = 0;
-
-        try {
-            SPManager sp = tn.eluea.kgpt.SPManager.getInstance();
-            generatingContentEnabledSnapshot = sp.getGeneratingContentEnabled();
-
-            toastEnabledSnapshot = sp.getGeneratingContentToastEnabled();
-            dynamicPrefixEnabledSnapshot = sp.getGeneratingContentDynamicPrefixEnabled();
-            tokenBurnerEnabledSnapshot = sp.getGeneratingContentTokenBurnerEnabled();
-            standaloneFloatEnabledSnapshot = sp.getGeneratingContentStandaloneFloatEnabled();
-            completeSoundSnapshot = sp.getGeneratingContentCompleteSound();
-            generatingTypingSoundEnabledSnapshot = sp.getGeneratingContentTypingSoundEnabled();
-            generatingTypingSoundStyleSnapshot = sp.getGeneratingContentTypingSoundStyle();
-            thinkingElapsedEnabledSnapshot = sp.getGeneratingContentThinkingElapsedEnabled();
-            replyTokenCounterEnabledSnapshot = sp.getGeneratingContentReplyTokenCounterEnabled();
-            replyTokenCounterAutoRemoveSnapshot = sp.getGeneratingContentReplyTokenCounterAutoRemove();
-            replyTokenCounterAutoRemoveDelayMsSnapshot = sp.getGeneratingContentReplyTokenCounterAutoRemoveDelayMs();
-
-            String prefPrefix = sp.getGeneratingContentPrefix();
-            if (prefPrefix == null || prefPrefix.length() == 0) {
-                generatingContentSnapshot = getDefaultGeneratingContentString();
-            } else {
-                generatingContentSnapshot = prefPrefix;
-            }
-
-            String suf = sp.getGeneratingContentSuffix();
-            suffixAfterCursorSnapshot = (suf == null) ? "" : suf;
-            rawSuffixKeywordSnapshot = suffixAfterCursorSnapshot;
-
-            // v4+: input-box role marker mode (plain text, supports {role} templates)
-            // v6: master switch + per-position toggles
-            inputRoleMarkerEnabledSnapshot = sp.getGeneratingContentInputRoleMarkerEnabled();
-            inputRoleMarkerApplyToSuffixSnapshot = sp.getGeneratingContentInputRoleMarkerApplyToSuffixEnabled();
-            inputRoleMarkerApplyToPrefixSnapshot = sp.getGeneratingContentInputRoleMarkerApplyToPrefixEnabled();
-
-            boolean roleMarkerNeedRole = inputRoleMarkerEnabledSnapshot &&
-                    (inputRoleMarkerApplyToSuffixSnapshot || inputRoleMarkerApplyToPrefixSnapshot);
-
-            if (roleMarkerNeedRole) {
-                // Resolve role name (best-effort) and sanitize to plain BMP text.
-                String roleName = pendingUiRoleName;
-                if (roleName == null || roleName.trim().isEmpty()) {
-                    try { roleName = sanitizePlainRoleName(resolveRoleNameById(pendingUiRoleId, sp.getRolesJson())); } catch (Throwable ignored2) {}
-                }
-                if (roleName == null || roleName.trim().isEmpty()) roleName = "AI";
-                currentRequestRoleNameSnapshot = roleName;
-
-                // Apply role name into user-configured placeholders.
-                // - If the text contains {role} or ${role}, we substitute it.
-                // - Otherwise, we automatically prefix the role name.
-                // - Always sanitize to plain text (no emoji/spans) for IME-host input boxes.
-
-                if (inputRoleMarkerApplyToPrefixSnapshot) {
-                    String prefFallbackRole = roleName + "正在思考";
-                    generatingContentSnapshot = applyRoleToPlaceholder(generatingContentSnapshot, roleName, prefFallbackRole);
-                    generatingContentSnapshot = sanitizePlainInputMarkerText(generatingContentSnapshot);
-                    if (generatingContentSnapshot == null || generatingContentSnapshot.trim().isEmpty()) {
-                        generatingContentSnapshot = sanitizePlainInputMarkerText(getDefaultGeneratingContentString());
-                    }
-                }
-
-                if (inputRoleMarkerApplyToSuffixSnapshot) {
-                    String sufFallback = roleName + "正在回复";
-                    suffixAfterCursorSnapshot = applyRoleToPlaceholder(suffixAfterCursorSnapshot, roleName, sufFallback);
-                    suffixAfterCursorSnapshot = sanitizePlainInputMarkerText(suffixAfterCursorSnapshot);
-                    if (suffixAfterCursorSnapshot == null) suffixAfterCursorSnapshot = "";
-                    if (suffixAfterCursorSnapshot.trim().isEmpty()) suffixAfterCursorSnapshot = sufFallback;
-                    rawSuffixKeywordSnapshot = suffixAfterCursorSnapshot;
-                }
-            } else {
-                currentRequestRoleNameSnapshot = null;
-            }
-
-            vibrateOnReplySnapshot = sp.getAiReplyVibrateEnabled();
-            vibrateIntensityPercentSnapshot = sp.getAiReplyVibrateIntensityPercent();
-            vibrateFrequencyPercentSnapshot = sp.getAiReplyVibrateFrequencyPercent();
-            minVibrateIntervalMsSnapshot = mapVibrateFrequencyPercentToIntervalMs(vibrateFrequencyPercentSnapshot);
-            vibAmplitudeSnapshot = mapVibrateIntensityPercentToAmplitude(vibrateIntensityPercentSnapshot);
-
-            markerStyleSnapshot = sp.getGeneratingContentMarkerStyle();
-            // v8: Allow marker style (e.g., rainbow animation) to work together with:
-            // - custom placeholders
-            // - dynamic role name markers in the input box
-            // Users explicitly enable these features and expect them to be composable.
-            markerColorSnapshot = sp.getGeneratingContentMarkerColor();
-            markerAnimLengthSnapshot = sp.getGeneratingContentMarkerAnimLength();
-            markerAnimSpeedPercentSnapshot = sp.getGeneratingContentMarkerAnimSpeedPercent();
-        } catch (Throwable ignored) {
-            generatingContentEnabledSnapshot = true;
-            generatingContentSnapshot = getDefaultGeneratingContentString();
-            suffixAfterCursorSnapshot = "";
-            rawSuffixKeywordSnapshot = "";
-
-            toastEnabledSnapshot = true;
-            inputRoleMarkerEnabledSnapshot = false;
-            inputRoleMarkerApplyToSuffixSnapshot = true;
-            inputRoleMarkerApplyToPrefixSnapshot = false;
-            currentRequestRoleNameSnapshot = null;
-            dynamicPrefixEnabledSnapshot = true;
-            tokenBurnerEnabledSnapshot = true;
-            standaloneFloatEnabledSnapshot = false;
-            completeSoundSnapshot = SPManager.GEN_SOUND_NONE;
-            generatingTypingSoundEnabledSnapshot = false;
-            generatingTypingSoundStyleSnapshot = SPManager.GEN_TYPING_SOUND_STYLE_CLICK;
-            thinkingElapsedEnabledSnapshot = true;
-            replyTokenCounterEnabledSnapshot = false;
-            replyTokenCounterAutoRemoveSnapshot = true;
-            replyTokenCounterAutoRemoveDelayMsSnapshot = 0L;
-
-            vibrateOnReplySnapshot = false;
-            vibrateIntensityPercentSnapshot = 65;
-            vibrateFrequencyPercentSnapshot = 70;
-            minVibrateIntervalMsSnapshot = MIN_VIBRATE_INTERVAL_MS;
-            vibAmplitudeSnapshot = VibrationEffect.DEFAULT_AMPLITUDE;
-
-            markerStyleSnapshot = SPManager.GEN_MARKER_STYLE_PLAIN;
-            markerColorSnapshot = SPManager.GEN_MARKER_COLOR_BLUE;
-            markerAnimLengthSnapshot = 6;
-            markerAnimSpeedPercentSnapshot = 70;
-        }
-
-        // Dynamic status / token burner state (per request)
-        burnerActiveThisRequest = generatingContentEnabledSnapshot && toastEnabledSnapshot && tokenBurnerEnabledSnapshot;
-        burnerMaxTokensSnapshot = computeBurnerMaxTokens();
-        lastBannerUiUpdateAtMs = 0L;
-        requestPreparedAtMs = System.currentTimeMillis();
-        firstVisibleOutputAtMs = 0L;
-        lastTypingSoundAtMs = 0L;
-        lastThinkingPlaceholderUpdateAtMs = 0L;
-        lastReplyMarkerLiveTokenEstimate = -1;
-        currentGeneratingPrefixBeforeCursor = "";
-        thinkingElapsedToastShownThisRequest = false;
-        finalCompletionTokenEstimateSnapshot = 0;
-        finalCompletionCharCountSnapshot = 0;
-
-        streamReceivedTotalChars = 0;
-        streamCommittedTotalChars = 0;
-        modelSuggestsReasoning = computeModelSuggestsReasoning();
-        inThinkBlock = false;
-        codeFenceTripletCount = 0;
-        backtickStreak = 0;
-        geekCodeMode = false;
-
-        aiDiag("UI_PREPARE", "onAIPrepare");
-        if (onAiPrepareCallback != null) {
-            onAiPrepareCallback.run();
-        }
-
-        // In text action mode, delete the selected text first
-        if (isTextActionMode && pendingSelectedText != null) {
-            // The selected text should already be selected, so we just need to delete it
-            // and the AI response will replace it
-            IMSController.getInstance().flush();
-        } else {
-            IMSController.getInstance().flush();
-        }
-
-        // Insert only the "thinking" placeholder.
-        // The trailing "replying" keyword will be inserted ONLY when the first visible output arrives.
-        if (generatingContentEnabledSnapshot) {
-            String generatingContent = generatingContentSnapshot;
-            if (generatingContent != null && !generatingContent.isEmpty()) {
-                long now = System.currentTimeMillis();
-                currentGeneratingPrefixBeforeCursor = buildThinkingPlaceholderWithElapsed(now);
-                IMSController.getInstance().commit(currentGeneratingPrefixBeforeCursor);
-                justPrepared = true;
-                lastThinkingPlaceholderUpdateAtMs = now;
-                startThinkingPlaceholderTicker();
-            } else {
-                justPrepared = false;
-                currentGeneratingPrefixBeforeCursor = "";
-            }
-        } else {
-            justPrepared = false;
-            currentGeneratingPrefixBeforeCursor = "";
-        }
-        // Toast: thinking (use placeholder text by default)
-        showThinkingToastIfEnabled();
-
-        // Ensure any previous top status visuals are hidden (UI Cleanup).
-        try { TopStatusBanner.getInstance().hide(); } catch (Throwable ignored) {}
-        try { broadcastStandaloneGenHide(); } catch (Throwable ignored) {}
-
-        // Force an initial banner update so the token burner becomes visible immediately.
-        maybeUpdateBannerUi(/*force*/true);
-
-        IMSController.getInstance().stopNotifyInput();
-        IMSController.getInstance().startInputLock();
+        if (!safeRequestRunning) return;
+        Context context = UiInteractor.getInstance().getContext();
+        if (context != null && canUseTopBannerOverlayInCurrentContext())
+            TopStatusBanner.getInstance().show(context, "正在生成，原文保留中");
+        if (onAiPrepareCallback != null) onAiPrepareCallback.run();
+        UiInteractor.getInstance().toastShort("正在生成，原文将保留至完成");
     }
 
     private void clearGeneratingContent() {
@@ -2679,7 +2368,7 @@ if (ok) {
             i.putExtra(GeneratingStatusBridgeReceiver.EXTRA_TEXT, text);
             i.putExtra(GeneratingStatusBridgeReceiver.EXTRA_PROGRESS, progressPercent);
             i.putExtra(GeneratingStatusBridgeReceiver.EXTRA_COLOR, color);
-            ctx.sendBroadcast(i);
+            tn.eluea.kgpt.provider.BridgeAuth.send(ctx, i);
         } catch (Throwable ignored) {}
     }
 
@@ -2691,7 +2380,7 @@ if (ok) {
             i.setPackage(tn.eluea.kgpt.BuildConfig.APPLICATION_ID);
             i.putExtra(GeneratingStatusBridgeReceiver.EXTRA_CMD, GeneratingStatusBridgeReceiver.CMD_DONE);
             i.putExtra(GeneratingStatusBridgeReceiver.EXTRA_TEXT, text);
-            ctx.sendBroadcast(i);
+            tn.eluea.kgpt.provider.BridgeAuth.send(ctx, i);
         } catch (Throwable ignored) {}
     }
 
@@ -2702,7 +2391,7 @@ if (ok) {
             Intent i = new Intent(GeneratingStatusBridgeReceiver.ACTION);
             i.setPackage(tn.eluea.kgpt.BuildConfig.APPLICATION_ID);
             i.putExtra(GeneratingStatusBridgeReceiver.EXTRA_CMD, GeneratingStatusBridgeReceiver.CMD_HIDE);
-            ctx.sendBroadcast(i);
+            tn.eluea.kgpt.provider.BridgeAuth.send(ctx, i);
         } catch (Throwable ignored) {}
     }
 
@@ -2807,243 +2496,23 @@ if (ok) {
 
     @Override
     public void onAINext(String chunk) {
-        if (chunk == null || chunk.isEmpty()) return;
-
-        // User interrupt: do not write to the editor anymore. Optionally buffer.
-        if (interruptUiSuppressedThisRequest) {
-            appendToInterruptBuffer(chunk);
-            return;
-        }
-
-        // Strip a single leading "Assistant:" / "助手：" label once.
-        String stripped0 = maybeStripLeadingAssistantLabel(chunk);
-        if (stripped0 == null) return; // waiting for more characters
-        chunk = stripped0;
-        if (chunk == null || chunk.isEmpty()) return;
-
-        // --- Real-time state sniffing (fast scans) ---
-        try {
-            // Code fences: odd count => currently inside an unclosed code block.
-            // Use a tiny streak counter so we can detect "```" even if it splits across chunks.
-            for (int i = 0; i < chunk.length(); i++) {
-                char c = chunk.charAt(i);
-                if (c == '`') {
-                    backtickStreak++;
-                    if (backtickStreak >= 3) {
-                        codeFenceTripletCount++;
-                        backtickStreak = 0;
-                    }
-                } else {
-                    backtickStreak = 0;
-                }
-            }
-
-            // Think tags (some reasoning models wrap thoughts in <think>..</think>)
-            if (chunk.contains("<think>") || chunk.contains("<thinking>")) {
-                inThinkBlock = true;
-            }
-            if (chunk.contains("</think>") || chunk.contains("</thinking>")) {
-                inThinkBlock = false;
-            }
-        } catch (Throwable ignored) {}
-
-        // Update the top banner prompt + burner (throttled)
-        maybeUpdateBannerUi(/*force*/false);
-
-        streamReceivedTotalChars += chunk.length();
-
-        if (!streamingEnabledSnapshot) {
-            // Buffer only; commit onComplete.
-            bufferedResponse.append(chunk);
-            return;
-        }
-
-        if (prefetchEnabledSnapshot) {
-            // Buffer into prefetch first.
-            streamPrefetch.append(chunk);
-
-            // Start rendering only when we've prefetched enough to smooth out network jitter,
-            // OR if we already started.
-            if (!prefetchRenderStarted) {
-                if (streamPrefetch.length() >= prefetchStartCharsSnapshot) {
-                    topUpFromPrefetchIfNeeded(prefetchTopUpTargetSnapshot);
-                    prefetchRenderStarted = true;
-                    // Start immediately so user sees the first characters.
-                    scheduleStreamTickNow();
-                }
-                // Not enough yet: keep waiting ("Generating..." placeholder stays).
-                return;
-            }
-
-            // Already started: keep render buffer topped-up and ensure the clock keeps running.
-            if (streamPending.length() < prefetchLowWatermarkSnapshot) {
-                topUpFromPrefetchIfNeeded(prefetchTopUpTargetSnapshot);
-            }
-            // Do NOT schedule an immediate tick on each chunk; resume on the existing rhythm.
-            if (!streamScheduled) {
-                scheduleStreamTickDelayed(lastTickDelayMs);
-            }
-            return;
-        }
-
-        // No prefetch: append to render buffer and kick immediately.
-        streamPending.append(chunk);
-        scheduleStreamTickNow();
+        if (safeRequestRunning && chunk != null
+                && !tn.eluea.kgpt.llm.client.LanguageModelClient.INTERNAL_KEEPALIVE_MARKER.equals(chunk))
+            safeResponse.append(chunk);
     }
 
     @Override
     public void onAIError(Throwable t) {
-        // Silent cancel marker (user initiated hard stop)
-        String em = null;
-        try { em = (t == null ? null : t.getMessage()); } catch (Throwable ignored) {}
-        boolean isUserCancel = false;
-        try {
-            isUserCancel = (em != null && em.contains(GenerativeAIController.USER_CANCELLED_MARKER));
-        } catch (Throwable ignored) {}
-
-        // If user interrupted output, we should cleanup silently and (optionally) save buffered output.
-        if (interruptUiSuppressedThisRequest || isUserCancel) {
-            aiDiag("INTERRUPT_FINISH", "error=" + String.valueOf(em) + " userCancel=" + isUserCancel);
-            try {
-                harvestAnyPendingOutputIntoInterruptBuffer();
-            } catch (Throwable ignored) {}
-            try {
-                flushInterruptBufferToClipboardIfNeeded(isUserCancel ? "user_cancel" : "error");
-            } catch (Throwable ignored) {}
-            try {
-                stopUiOutputForInterrupt();
-            } catch (Throwable ignored) {}
-            resetInterruptState();
-            return;
-        }
-
-        burnerActiveThisRequest = false;
-        geekCodeMode = false;
-        cancelStreamTicks();
-        streamPending.setLength(0);
-        streamPrefetch.setLength(0);
-        streamCompleted = false;
-        prefetchRenderStarted = false;
-        IMSController.getInstance().endInputLock();
-        clearGeneratingContent();
-
-        // Clean up "replying" marker if it was inserted.
-        removeReplySuffixIfPresent();
-        stopReplyingToastLoop(/*showDoneToast*/false);
-        stopThinkingPlaceholderTicker();
-        releaseTypingTone();
-        replyStartedThisRequest = false;
-        lastVibrateAtMs = 0;
-
-        // If we were buffering, clear it (avoid committing partial output on error).
-        bufferedResponse.setLength(0);
-
-        String errorMsg = t.getMessage();
-        aiDiag("UI_ERROR", String.valueOf(errorMsg));
-        Context ctx = UiInteractor.getInstance().getContext();
-        if (errorMsg == null || errorMsg.isEmpty()) {
-            errorMsg = ctx != null ? ctx.getString(R.string.unknown_error) : "Unknown error occurred";
-        }
-
-        String plainHint = buildPlainFailureHint(errorMsg);
-        aiDiag("UI_ERROR_HINT", plainHint);
-        tn.eluea.kgpt.util.Logger.error("[AI_DIAG][AI_INPUT_FAIL_HINT] " + plainHint);
-        IMSController.getInstance().flush();
-        IMSController.getInstance().commit(plainHint);
-        IMSController.getInstance().startNotifyInput();
-        aiDiag("TRIGGER_RECOVER", "startNotifyInput after onAIError");
-
-        // Reset text action mode
-        setTextActionMode(false, null);
+        if (!safeRequestRunning) return;
+        finishSafeRequest(false);
+        String message = t == null ? "未知错误" : t.getMessage();
+        if (message == null || !message.contains(GenerativeAIController.USER_CANCELLED_MARKER))
+            UiInteractor.getInstance().toastLong("生成失败，原文已保留：" + message);
     }
 
     @Override
     public void onAIComplete() {
-        aiDiag("UI_COMPLETE", "onAIComplete");
-
-        // If user interrupted output, we do NOT commit anything to the input box.
-        // We either save the buffered output to AIClipboardStore (soft/both), or just cleanup (hard).
-        if (interruptUiSuppressedThisRequest) {
-            try {
-                // Harvest any leftover buffers just in case.
-                harvestAnyPendingOutputIntoInterruptBuffer();
-            } catch (Throwable ignored) {}
-
-            try {
-                flushInterruptBufferToClipboardIfNeeded("complete");
-            } catch (Throwable ignored) {}
-
-            try {
-                stopUiOutputForInterrupt();
-            } catch (Throwable ignored) {}
-
-            resetInterruptState();
-            return;
-        }
-        stopThinkingPlaceholderTicker();
-        // If streaming is disabled we commit once.
-        if (!streamingEnabledSnapshot) {
-            burnerActiveThisRequest = false;
-            geekCodeMode = false;
-            IMSController.getInstance().endInputLock();
-            clearGeneratingContent();
-
-            String out = bufferedResponse.toString();
-            bufferedResponse.setLength(0);
-            if (out != null && !out.isEmpty()) {
-                IMSController.getInstance().flush();
-                // Insert "replying" marker only when we are about to show real output.
-                replyStartedThisRequest = true;
-                markFirstVisibleOutputIfNeeded();
-                ensureReplySuffixInsertedIfNeeded();
-                showReplyingToastIfNeeded();
-                // A short pulse so the user still gets feedback in non-stream mode.
-                vibratePulseMs(35);
-                maybePlayTypingSoundOnOutputTick(out.length());
-                IMSController.getInstance().commit(out);
-                finalCompletionCharCountSnapshot = out.length();
-                finalCompletionTokenEstimateSnapshot = (int) Math.round(Math.max(0, out.length()) / 1.5);
-                // Remove trailing keyword after output finishes.
-                removeReplySuffixIfPresent();
-                stopReplyingToastLoop(/*showDoneToast*/true);
-                showCompletionTokenToastIfNeeded(finalCompletionCharCountSnapshot);
-                playCompletionSoundIfNeeded();
-            }
-
-            releaseTypingTone();
-            IMSController.getInstance().startNotifyInput();
-            aiDiag("TRIGGER_RECOVER", "startNotifyInput after onAIComplete");
-
-            // Reset text action mode
-            setTextActionMode(false, null);
-            replyStartedThisRequest = false;
-            lastVibrateAtMs = 0;
-            stopThinkingPlaceholderTicker();
-            currentGeneratingPrefixBeforeCursor = "";
-            requestPreparedAtMs = 0L;
-            firstVisibleOutputAtMs = 0L;
-            thinkingElapsedToastShownThisRequest = false;
-            return;
-        }
-
-        // Streaming enabled: finish only after the pending buffer is drained.
-        bufferedResponse.setLength(0);
-        streamCompleted = true;
-
-        if (prefetchEnabledSnapshot) {
-            // Flush all remaining prefetched text into the render buffer.
-            topUpFromPrefetchIfNeeded(Integer.MAX_VALUE / 4);
-            // If we never started (short answer), start now.
-            if (!prefetchRenderStarted) {
-                prefetchRenderStarted = true;
-            }
-        }
-        // If no pending content (e.g., backend sent empty), finish immediately.
-        if (streamPending.length() == 0) {
-            finishStreamingIfNeeded();
-        } else {
-            scheduleStreamTickNow();
-        }
+        if (safeRequestRunning) finishSafeRequest(true);
     }
 
 
